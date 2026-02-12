@@ -1,0 +1,148 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Jobs;
+
+use App\Contracts\AiNormalizerInterface;
+use App\DTOs\ListingDTO;
+use App\Enums\ListingStatus;
+use App\Exceptions\AiNormalizationException;
+use App\Models\Listing;
+use App\Services\ListingService;
+use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Foundation\Bus\Dispatchable;
+use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Log;
+use Throwable;
+
+/**
+ * AI normalization job — runs on the `ai` queue.
+ *
+ * Thin orchestrator: reads raw HTML from the skeleton listing,
+ * sends it to the AI service for extraction, then delegates
+ * all persistence logic to ListingService.
+ */
+final class ProcessAiNormalizationJob implements ShouldQueue
+{
+    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+
+    public int $tries = 5;
+    public int $timeout = 120;
+
+    private const RATE_LIMIT_DELAYS  = [60, 120, 240, 480, 960];
+
+    public function backoff(): array
+    {
+        return [120, 300, 600, 900, 1200];
+    }
+
+    public function __construct(
+        private readonly int $listingId,
+    ) {
+        $this->onQueue('ai');
+    }
+
+    public function handle(
+        AiNormalizerInterface $aiService,
+        ListingService $listingService,
+    ): void {
+        ini_set('memory_limit', '256M');
+
+        $listing = Listing::find($this->listingId);
+
+        if ($listing === null) {
+            Log::warning('AI job: Listing not found', ['listing_id' => $this->listingId]);
+
+            return;
+        }
+
+        if ($listing->status !== ListingStatus::PENDING) {
+            return;
+        }
+
+        try {
+            $dto = $this->normalizeWithRetry($aiService, $listing);
+
+            if ($dto === null) {
+                return;
+            }
+
+            $listingService->applyNormalization($listing, $dto);
+
+            unset($dto);
+            if (function_exists('gc_collect_cycles')) {
+                gc_collect_cycles();
+            }
+        } catch (Throwable $e) {
+            Log::error('AI normalization job failed', [
+                'listing_id' => $this->listingId,
+                'error'      => $e->getMessage(),
+                'attempt'    => $this->attempts(),
+            ]);
+
+            throw $e;
+        }
+    }
+
+    public function failed(?Throwable $exception): void
+    {
+        Log::error('AI normalization permanently failed', [
+            'listing_id'      => $this->listingId,
+            'error'           => $exception?->getMessage(),
+            'attempts'        => $this->attempts(),
+            'exception_class' => $exception ? get_class($exception) : null,
+        ]);
+
+        try {
+            app(ListingService::class)->markUnverified($this->listingId);
+        } catch (Throwable $e) {
+            Log::error('Fallback status update also failed', [
+                'listing_id' => $this->listingId,
+                'error'      => $e->getMessage(),
+            ]);
+        }
+    }
+
+    private function normalizeWithRetry(AiNormalizerInterface $aiService, Listing $listing): ?ListingDTO
+    {
+        $rawData = [
+            'external_id' => $listing->external_id,
+            'raw_html'    => $listing->raw_data['html'] ?? '',
+            'raw_data'    => $listing->raw_data ?? [],
+        ];
+
+        try {
+            return $aiService->normalize($rawData);
+        } catch (AiNormalizationException $e) {
+            if (! $e->retryable) {
+                throw $e;
+            }
+
+            if ($this->attempts() >= $this->tries) {
+                Log::warning("All retries exhausted ({$e->httpStatus}), marking as unverified.", [
+                    'listing_id' => $this->listingId,
+                    'attempts'   => $this->attempts(),
+                ]);
+
+                throw $e;
+            }
+
+            $delays = $e->httpStatus === 429 ? self::RATE_LIMIT_DELAYS : $this->backoff();
+            $index  = min($this->attempts() - 1, count($delays) - 1);
+
+            Log::warning('Releasing AI job for retry', [
+                'listing_id' => $this->listingId,
+                'reason'     => $e->httpStatus,
+                'attempt'    => $this->attempts(),
+                'delay_sec'  => $delays[$index],
+            ]);
+
+            $this->release(now()->addSeconds($delays[$index]));
+
+            return null;
+        }
+    }
+}
