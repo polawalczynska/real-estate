@@ -1,60 +1,93 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# U N I T
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+**Intelligent real estate, distilled.**
 
-## About Laravel
+A curated property platform combining automated data acquisition with AI-driven normalisation and natural-language search. Built on Laravel 12, Livewire 3, and Tailwind CSS 4.
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+---
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+## Technical Highlights
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+### Asynchronous Data Pipeline
 
-## Learning Laravel
+Raw HTML from property portals flows through a multi-stage pipeline:
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework. You can also check out [Laravel Learn](https://laravel.com/learn), where you will be guided through building a modern Laravel application.
+```
+Scrape → DOM Metadata Extraction → Fingerprint Dedup → Claude AI Normalisation → Image Curation
+```
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+Each listing is processed across two dedicated queues (`ai` for normalisation, `media` for image downloads), enabling the UI to display skeleton cards immediately while background jobs enrich data in parallel. Livewire's `wire:poll` drives automatic frontend refresh as jobs complete — images fade in without page reloads.
 
-## Laravel Sponsors
+### Semantic Fingerprint Deduplication
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+A **fingerprint-first** strategy prevents duplicate AI spending. Before any API call, a normalised MD5 hash is computed from raw DOM metadata (city + street + price rounded to nearest 1,000 + area rounded to integer + rooms). Duplicates within a 30-day temporal window are merged instantly. A secondary post-AI fingerprint check catches cross-platform duplicates that raw extraction missed.
 
-### Premium Partners
+### AI Concierge (Natural-Language Search)
 
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
+Users describe spaces in plain language — *"sunny loft in Kraków under 2M"* — and Claude parses intent into structured `SearchCriteriaDTO` filters. Conversation history (last 10 messages) provides multi-turn context. State persists in the Laravel session across `wire:navigate` page transitions.
 
-## Contributing
+### Real-Time Reactive UI
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+Reactive `wire:key` bindings on media containers force DOM updates when images arrive. Scoped `wire:target` directives prevent unrelated UI elements from flickering during background polls. Loading states use skeleton loaders with `animate-pulse` — never empty space.
 
-## Code of Conduct
+---
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+## Architecture
 
-## Security Vulnerabilities
+| Layer | Technology |
+|---|---|
+| **Framework** | Laravel 12 (PHP 8.2+, `declare(strict_types=1)` everywhere) |
+| **Frontend** | Livewire 3 · Alpine.js · Tailwind CSS 4 · Flux UI |
+| **AI** | Anthropic Claude (Haiku for normalisation, Sonnet for search) |
+| **Database** | MySQL 8+ with composite indexes, fulltext search, JSON columns |
+| **Media** | Spatie Media Library (WebP conversions, hero designation) |
+| **Queue** | Laravel Database Queue (parallel `ai` + `media` workers) |
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+### Design Patterns
 
-## License
+- **Contract-driven services** — all AI, image, and scraping logic bound via interfaces (`AiNormalizerInterface`, `AiSearchInterface`, `ImageAttacherInterface`, `ListingProviderInterface`), making providers swappable without touching consumers.
+- **Readonly DTOs** — `ListingDTO` and `SearchCriteriaDTO` enforce immutability for data flowing between services.
+- **Enums for domain constants** — `ListingStatus` and `PropertyType` eliminate magic strings.
+- **Centralised AI prompts** — `config/ai_prompts.php` keeps prompt engineering separate from business logic.
+- **Fingerprint-first deduplication** — semantic hashing before AI calls minimises API spend.
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
-# real-estate
+## Setup
+
+```bash
+git clone <repo-url> unit && cd unit
+composer install
+npm install && npm run build
+
+cp .env.example .env
+php artisan key:generate
+
+# Configure .env: DB credentials + ANTHROPIC_API_KEY
+
+php artisan migrate
+php artisan storage:link
+php artisan listings:import --limit=20
+
+# Development (serves app, queue worker, Vite, and Pail in parallel)
+composer run dev
+```
+
+## Environment Variables
+
+| Key | Purpose |
+|---|---|
+| `ANTHROPIC_API_KEY` | Claude API key (required for AI pipeline) |
+| `ANTHROPIC_MODEL` | Normalisation model (default: `claude-haiku-4-5-20251001`) |
+| `ANTHROPIC_SEARCH_MODEL` | Search/concierge model (default: `claude-sonnet-4-5-20250929`) |
+| `DB_CONNECTION` | `mysql` (only supported driver) |
+| `QUEUE_CONNECTION` | `database` (required for async processing) |
+
+## Key Commands
+
+```bash
+php artisan listings:import --limit=20        # Scrape + queue AI normalisation + image download
+php artisan listings:import --limit=5 --sync  # Process synchronously (debugging)
+php artisan listings:fix-images               # Re-attach missing images for existing listings
+php artisan listings:backfill-fingerprints    # Generate dedup hashes for legacy records
+php artisan listings:backfill-keywords        # Extract keywords heuristically (no AI cost)
+composer run dev                              # Full dev stack (server + queue + Vite + Pail)
+```
