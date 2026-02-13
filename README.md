@@ -1,93 +1,51 @@
-# U N I T
+### Data Extraction
 
-**Intelligent real estate, distilled.**
+Structured metadata (title, price, area, rooms, city, street, type, description, keywords) and AI-curated images (hero + gallery URLs) enable fast filtering, natural-language search, and cross-platform deduplication via semantic fingerprints.
 
-A curated property platform combining automated data acquisition with AI-driven normalisation and natural-language search. Built on Laravel 12, Livewire 3, and Tailwind CSS 4.
+### How Unstructured or Low-Quality Data Is Handled
 
----
+**Phase 1: DOM extraction** (`HtmlExtractorService`): Parses JSON-LD `@type` nodes and `additionalProperty` fields from raw HTML. Extracts price, city, area, rooms, street, and image URLs deterministically - no AI involved. This provides the data needed for fingerprint calculation and reduces AI token usage.
 
-## Technical Highlights
+**Phase 2: AI normalisation + imputation** (`AiNormalizationService`): Claude translates Polish content to English, maps building types to `PropertyType` enums, curates images (1 hero + 4 gallery via URL patterns), and repairs missing fields (rooms/type inferred from description context). A local safety net re-runs imputation after the AI call.
 
-### Asynchronous Data Pipeline
+**Phase 3: Validation & scoring**: `ListingDTO` validates critical fields (price, area_m2, city). Missing criticals → status `INCOMPLETE` or `FAILED` (hidden from users). A quality score (0–100) tracks completeness: −20 for missing street, −10 for missing rooms/description/type, −5 for missing keywords/images.
 
-Raw HTML from property portals flows through a multi-stage pipeline:
+### Where and Why AI Is Used
 
-```
-Scrape → DOM Metadata Extraction → Fingerprint Dedup → Claude AI Normalisation → Image Curation
-```
+**1. Normalisation & Repair:** Translates Polish titles/descriptions to English, cleans street prefixes, maps types to `PropertyType` enums (apartment, house, loft, townhouse, studio, penthouse, villa), and imputes missing rooms/type from context.
 
-Each listing is processed across two dedicated queues (`ai` for normalisation, `media` for image downloads), enabling the UI to display skeleton cards immediately while background jobs enrich data in parallel. Livewire's `wire:poll` drives automatic frontend refresh as jobs complete — images fade in without page reloads.
+**2. Image Curation:** Selects 5 images (1 hero + 4 gallery) from available photos using URL patterns and text labels (not visual analysis).
 
-### Semantic Fingerprint Deduplication
+**3. Natural-Language Search:** The AI Concierge converts queries like *"sunny loft in Kraków under 2M"* into structured filters (city, type, keywords, price range) that drive the Eloquent query.
 
-A **fingerprint-first** strategy prevents duplicate AI spending. Before any API call, a normalised MD5 hash is computed from raw DOM metadata (city + street + price rounded to nearest 1,000 + area rounded to integer + rooms). Duplicates within a 30-day temporal window are merged instantly. A secondary post-AI fingerprint check catches cross-platform duplicates that raw extraction missed.
+### One Key Assumption
 
-### AI Concierge (Natural-Language Search)
+Real estate portals embed JSON-LD structured data. The extractor relies on `@type` detection (Product, Apartment, Residence, etc.) and `additionalProperty` fields. Schema changes on the source portal require parser updates.
 
-Users describe spaces in plain language — *"sunny loft in Kraków under 2M"* — and Claude parses intent into structured `SearchCriteriaDTO` filters. Conversation history (last 10 messages) provides multi-turn context. State persists in the Laravel session across `wire:navigate` page transitions.
+### One Success Metric
 
-### Real-Time Reactive UI
+**Fingerprint-First Deduplication:** Pre-AI duplicate detection (30-day window) using JSON-LD metadata skips AI calls entirely, saving API costs. Post-AI fingerprint re-check catches cross-platform duplicates and merges them automatically.
 
-Reactive `wire:key` bindings on media containers force DOM updates when images arrive. Scoped `wire:target` directives prevent unrelated UI elements from flickering during background polls. Loading states use skeleton loaders with `animate-pulse` — never empty space.
+### One Failure Mode or Limitation
 
----
+**Queue Worker Dependency:** Requires workers on `ai` and `media` queues running simultaneously. If the AI worker stops, listings stay in `PENDING` status indefinitely. No automatic health checks or restarts are implemented.
 
-## Architecture
+### What Would Be Improved With More Time
 
-| Layer | Technology |
-|---|---|
-| **Framework** | Laravel 12 (PHP 8.2+, `declare(strict_types=1)` everywhere) |
-| **Frontend** | Livewire 3 · Alpine.js · Tailwind CSS 4 · Flux UI |
-| **AI** | Anthropic Claude (Haiku for normalisation, Sonnet for search) |
-| **Database** | MySQL 8+ with composite indexes, fulltext search, JSON columns |
-| **Media** | Spatie Media Library (WebP conversions, hero designation) |
-| **Queue** | Laravel Database Queue (parallel `ai` + `media` workers) |
+1. **Multi-provider support** - currently only Otodom.pl
+2. **Visual content filtering** - use image recognition to filter floor plans from hero selection etc.
+3. **Incremental updates** - re-scrape existing listings for price/status changes
+4. **Enhanced deduplication** - the app currently only recognizes exact duplicates
 
-### Design Patterns
+### Example User Journeys
 
-- **Contract-driven services** — all AI, image, and scraping logic bound via interfaces (`AiNormalizerInterface`, `AiSearchInterface`, `ImageAttacherInterface`, `ListingProviderInterface`), making providers swappable without touching consumers.
-- **Readonly DTOs** — `ListingDTO` and `SearchCriteriaDTO` enforce immutability for data flowing between services.
-- **Enums for domain constants** — `ListingStatus` and `PropertyType` eliminate magic strings.
-- **Centralised AI prompts** — `config/ai_prompts.php` keeps prompt engineering separate from business logic.
-- **Fingerprint-first deduplication** — semantic hashing before AI calls minimises API spend.
+**Journey 1: Natural-Language Search**
+1. User types *"sunny loft in Kraków under 2M"* in the hero search bar
+2. AI Concierge parses intent → `city: "Krakow"`, `type: "loft"`, `keywords: ["sunny"]`, `price_max: 2000000`
+3. System displays filtered listings
+4. User clicks a listing card → views full details with gallery
 
-## Setup
-
-```bash
-git clone <repo-url> unit && cd unit
-composer install
-npm install && npm run build
-
-cp .env.example .env
-php artisan key:generate
-
-# Configure .env: DB credentials + ANTHROPIC_API_KEY
-
-php artisan migrate
-php artisan storage:link
-php artisan listings:import --limit=20
-
-# Development (serves app, queue worker, Vite, and Pail in parallel)
-composer run dev
-```
-
-## Environment Variables
-
-| Key | Purpose |
-|---|---|
-| `ANTHROPIC_API_KEY` | Claude API key (required for AI pipeline) |
-| `ANTHROPIC_MODEL` | Normalisation model (default: `claude-haiku-4-5-20251001`) |
-| `ANTHROPIC_SEARCH_MODEL` | Search/concierge model (default: `claude-sonnet-4-5-20250929`) |
-| `DB_CONNECTION` | `mysql` (only supported driver) |
-| `QUEUE_CONNECTION` | `database` (required for async processing) |
-
-## Key Commands
-
-```bash
-php artisan listings:import --limit=20        # Scrape + queue AI normalisation + image download
-php artisan listings:import --limit=5 --sync  # Process synchronously (debugging)
-php artisan listings:fix-images               # Re-attach missing images for existing listings
-php artisan listings:backfill-fingerprints    # Generate dedup hashes for legacy records
-php artisan listings:backfill-keywords        # Extract keywords heuristically (no AI cost)
-composer run dev                              # Full dev stack (server + queue + Vite + Pail)
-```
+**Journey 2 — Filter-Based Discovery**
+1. User browses the listings page and applies filters: price range, area, rooms, city, property type
+2. Eloquent scopes query indexed structured metadata
+3. User clicks a listing card → views full details with gallery
