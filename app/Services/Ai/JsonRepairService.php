@@ -75,27 +75,6 @@ final class JsonRepairService
         return null;
     }
 
-    public function cleanUtf8(mixed $data): mixed
-    {
-        if (is_array($data)) {
-            return array_map([$this, 'cleanUtf8'], $data);
-        }
-
-        if (is_string($data)) {
-            if (function_exists('iconv')) {
-                $data = @iconv('UTF-8', 'UTF-8//IGNORE', $data);
-            }
-            if ($data !== false) {
-                $data = mb_convert_encoding($data, 'UTF-8', 'UTF-8');
-            }
-            $data = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $data);
-
-            return $data ?: '';
-        }
-
-        return $data;
-    }
-
     private function findJsonObject(string $content): array
     {
         $braceCount   = 0;

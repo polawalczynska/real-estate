@@ -39,17 +39,6 @@ final class FingerprintService
         ]));
     }
 
-    public static function fromRawMetadata(array $meta): string
-    {
-        return self::calculate(
-            city:   (string) ($meta['city'] ?? ''),
-            street: $meta['street'] ?? null,
-            price:  (float) ($meta['price'] ?? 0),
-            areaM2: (float) ($meta['area_m2'] ?? 0),
-            rooms:  (int) ($meta['rooms'] ?? 0),
-        );
-    }
-
     private static function normaliseText(?string $value, string $fallback): string
     {
         $clean = mb_strtolower(trim($value ?? ''));

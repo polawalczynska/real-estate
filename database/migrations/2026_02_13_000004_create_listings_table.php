@@ -25,29 +25,32 @@ return new class extends Migration
             $table->string('street')->nullable();
             $table->string('type');
             $table->string('status')->default('available');
+            $table->unsignedTinyInteger('quality_score')->default(0);
+            $table->boolean('is_fully_parsed')->default(false);
+            $table->json('raw_data')->nullable();
             $table->json('images')->nullable();
             $table->json('keywords')->nullable();
-            $table->json('raw_data')->nullable();
             $table->timestamp('last_seen_at')->nullable();
             $table->timestamps();
 
-            // ── Single-column indexes ────────────────────────────────
+            // Single-column indexes
             $table->index('price');
             $table->index('area_m2');
             $table->index('rooms');
             $table->index('city');
             $table->index('type');
             $table->index('status');
+            $table->index('quality_score');
             $table->index('created_at');
 
-            // ── Composite indexes ────────────────────────────────────
+            // Composite indexes
             $table->index(['fingerprint', 'updated_at'], 'listings_fingerprint_freshness_index');
             $table->index(['status', 'price'], 'listings_status_price_index');
             $table->index(['status', 'created_at'], 'listings_status_created_at_index');
             $table->index(['status', 'area_m2'], 'listings_status_area_m2_index');
         });
 
-        // Full-text index for semantic keyword fallback
+        // Full-text index for semantic keyword fallback (MySQL only)
         if (config('database.default') === 'mysql') {
             DB::statement('ALTER TABLE listings ADD FULLTEXT INDEX listings_fulltext_index (title, description)');
         }
