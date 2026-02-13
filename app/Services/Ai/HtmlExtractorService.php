@@ -455,16 +455,7 @@ final class HtmlExtractorService
     {
         $imageData = [];
 
-        $nodes = $xpath->query('
-            //img[@src] | //img[@data-src] | //img[@data-lazy-src] |
-            //img[@data-original] | //img[@data-url] |
-            //*[@style[contains(., "background-image")]] |
-            //*[@data-image] |
-            //*[@class[contains(., "gallery") or contains(., "image") or contains(., "photo") or contains(., "carousel") or contains(., "slider")]]//img |
-            //*[@id[contains(., "gallery") or contains(., "image") or contains(., "photo")]]//img |
-            //picture//img |
-            //source[@srcset]
-        ');
+        $nodes = $xpath->query('//picture//img | //picture//source[@srcset]');
 
         foreach ($nodes as $node) {
             $src = $this->resolveImageSrc($node);
@@ -602,9 +593,17 @@ final class HtmlExtractorService
             $images = $this->pluckImages($xpath);
             unset($xpath);
 
-            return array_values(array_unique(
-                array_map(static fn (array $img): string => $img['url'], $images),
-            ));
+            $unique = [];
+            $seen   = [];
+            foreach ($images as $img) {
+                $url = $img['url'] ?? '';
+                if ($url !== '' && ! isset($seen[$url])) {
+                    $seen[$url] = true;
+                    $unique[]   = $img;
+                }
+            }
+
+            return $unique;
         } catch (Throwable $e) {
             Log::warning('HtmlExtractor: DOM image extraction failed', ['error' => $e->getMessage()]);
 

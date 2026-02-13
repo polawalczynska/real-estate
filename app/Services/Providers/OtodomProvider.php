@@ -5,61 +5,94 @@ declare(strict_types=1);
 namespace App\Services\Providers;
 
 use App\Contracts\ListingProviderInterface;
+use App\Exceptions\ScraperException;
 use App\Services\Ai\HtmlExtractorService;
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
 /**
- * Scrapes raw listing HTML from Otodom.pl.
+ * Scrapes raw listing HTML from Otodom.pl and extracts structured
+ * data via JSON-LD (Phase 1: Technical Extraction).
  *
- * This provider ONLY handles data collection — no AI processing.
- * Returns raw HTML and DOM-extracted metadata for downstream jobs.
+ * All URLs, timeouts, and delays are read from `config/scraper.php`
+ * so the provider can be tuned per-environment without code changes.
  *
- * Flow:
- *  1. Paginate through search results pages to collect offer URLs.
+ * Pipeline:
+ *  1. Paginate search results to collect offer URLs.
  *  2. Fetch each offer's full HTML.
- *  3. Extract basic metadata (title, images) via DOM — no AI.
- *  4. Return raw data for skeleton creation and parallel job dispatch.
+ *  3. Extract structured data from JSON-LD — deterministic, no AI.
+ *  4. Return enriched payloads for skeleton creation + AI dispatch.
  */
 final class OtodomProvider implements ListingProviderInterface
 {
-    private const MAX_PAGES              = 5;
-    private const PAGE_DELAY_SECONDS     = 1;
-    private const OFFER_DELAY_SECONDS    = 1;
-    private const REQUEST_TIMEOUT_SECONDS = 30;
+    private readonly string $baseUrl;
+
+    private readonly string $searchPath;
+
+    private readonly int $maxPages;
+
+    private readonly int $pageDelay;
+
+    private readonly int $offerDelay;
+
+    private readonly int $requestTimeout;
 
     public function __construct(
         private readonly HtmlExtractorService $htmlExtractor,
-        private readonly string $baseUrl = 'https://www.otodom.pl',
-    ) {}
+    ) {
+        $this->baseUrl        = config('scraper.otodom.base_url', 'https://www.otodom.pl');
+        $this->searchPath     = config('scraper.otodom.search_path', '/pl/wyniki/sprzedaz/mieszkanie');
+        $this->maxPages       = config('scraper.otodom.max_pages', 5);
+        $this->pageDelay      = config('scraper.otodom.page_delay', 1);
+        $this->offerDelay     = config('scraper.otodom.offer_delay', 1);
+        $this->requestTimeout = config('scraper.otodom.request_timeout', 30);
+    }
 
+    /**
+     * {@inheritDoc}
+     *
+     * @throws ScraperException On unrecoverable network or parsing failures.
+     */
     public function fetch(int $limit = 10): array
     {
         try {
             $offerUrls = $this->collectOfferUrls($limit);
 
             if ($offerUrls === []) {
-                Log::warning('OtodomProvider: No offer URLs found');
+                Log::warning('OtodomProvider: No offer URLs found on search pages.');
+
                 return [];
             }
 
             return $this->scrapeOffers($offerUrls);
+        } catch (ScraperException $e) {
+            throw $e;
         } catch (Throwable $e) {
             $level = $this->isNetworkError($e) ? 'notice' : 'warning';
-            Log::log($level, 'OtodomProvider: Fetch failed', ['error' => $e->getMessage()]);
+            Log::log($level, 'OtodomProvider: Fetch failed', [
+                'error' => $e->getMessage(),
+            ]);
         }
 
         return [];
     }
 
+    // ─── Search-Page Crawling ─────────────────────────────────────
+
+    /**
+     * Paginate through search results and collect unique offer URLs.
+     *
+     * @return list<string> Unique offer URLs, up to $limit.
+     */
     private function collectOfferUrls(int $limit): array
     {
-        $baseSearchUrl = $this->baseUrl . '/pl/wyniki/sprzedaz/mieszkanie';
+        $baseSearchUrl = $this->baseUrl . $this->searchPath;
         $offerUrls     = [];
         $page          = 1;
 
-        while (count($offerUrls) < $limit && $page <= self::MAX_PAGES) {
+        while (count($offerUrls) < $limit && $page <= $this->maxPages) {
             $searchUrl = $page === 1
                 ? $baseSearchUrl
                 : $baseSearchUrl . '?page=' . $page;
@@ -73,10 +106,9 @@ final class OtodomProvider implements ListingProviderInterface
                 break;
             }
 
-            $body = $response->body();
-            unset($response);
+            $body     = $response->body();
             $pageUrls = $this->extractOfferUrls($body, $limit - count($offerUrls));
-            unset($body);
+            unset($body, $response);
 
             if ($pageUrls === []) {
                 break;
@@ -93,14 +125,22 @@ final class OtodomProvider implements ListingProviderInterface
 
             $page++;
 
-            if ($page <= self::MAX_PAGES && count($offerUrls) < $limit) {
-                sleep(self::PAGE_DELAY_SECONDS);
+            if ($page <= $this->maxPages && count($offerUrls) < $limit) {
+                sleep($this->pageDelay);
             }
         }
 
         return array_slice($offerUrls, 0, $limit);
     }
 
+    // ─── Offer Scraping ───────────────────────────────────────────
+
+    /**
+     * Fetch and extract structured data from each offer URL.
+     *
+     * @param  list<string>  $offerUrls
+     * @return list<array<string, mixed>>
+     */
     private function scrapeOffers(array $offerUrls): array
     {
         $results = [];
@@ -120,23 +160,30 @@ final class OtodomProvider implements ListingProviderInterface
                 $html = $response->body();
                 unset($response);
 
-                $this->htmlExtractor->extractContent($html);
-                $images = $this->htmlExtractor->getLastExtractedImages();
-                $title  = $this->htmlExtractor->extractTitle($html);
+                $jsonLd = $this->htmlExtractor->extractJsonLd($html);
+
+                if ($jsonLd === null) {
+                    Log::warning('OtodomProvider: No JSON-LD found, skipping offer', [
+                        'url' => $offerUrl,
+                    ]);
+                    unset($html);
+                    continue;
+                }
 
                 $results[] = [
-                    'external_id'      => 'otodom_' . md5($offerUrl),
-                    'title'            => $title,
+                    'external_id'      => $jsonLd['external_id'] ?? ('otodom_' . md5($offerUrl)),
+                    'title'            => $jsonLd['title'],
                     'url'              => $offerUrl,
                     'raw_html'         => $html,
-                    'extracted_images' => $images,
+                    'extracted_images' => $jsonLd['images'],
+                    'json_ld'          => $jsonLd,
                     'scraped_at'       => now()->toIso8601String(),
                 ];
 
                 unset($html);
 
                 if (count($results) < count($offerUrls)) {
-                    sleep(self::OFFER_DELAY_SECONDS);
+                    sleep($this->offerDelay);
                 }
             } catch (Throwable $e) {
                 Log::error('OtodomProvider: Scrape failed', [
@@ -151,6 +198,13 @@ final class OtodomProvider implements ListingProviderInterface
         return $results;
     }
 
+    // ─── URL Extraction ───────────────────────────────────────────
+
+    /**
+     * Extract offer URLs from a search-results HTML page.
+     *
+     * @return list<string>
+     */
     private function extractOfferUrls(string $html, int $limit): array
     {
         $urls = [];
@@ -182,13 +236,20 @@ final class OtodomProvider implements ListingProviderInterface
         return array_slice($urls, 0, $limit);
     }
 
-    private function request(string $url): \Illuminate\Http\Client\Response
+    // ─── HTTP ─────────────────────────────────────────────────────
+
+    /**
+     * Perform a browser-like HTTP GET request.
+     */
+    private function request(string $url): Response
     {
-        return Http::timeout(self::REQUEST_TIMEOUT_SECONDS)
+        $userAgent = config('scraper.browser_headers.user_agent');
+
+        return Http::timeout($this->requestTimeout)
             ->withHeaders([
-                'User-Agent'                => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept'                    => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language'           => 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
+                'User-Agent'                => $userAgent,
+                'Accept'                    => config('scraper.browser_headers.accept_html'),
+                'Accept-Language'           => config('scraper.browser_headers.accept_language'),
                 'Accept-Encoding'           => 'gzip, deflate, br',
                 'Connection'                => 'keep-alive',
                 'Upgrade-Insecure-Requests' => '1',
@@ -197,6 +258,9 @@ final class OtodomProvider implements ListingProviderInterface
             ->get($url);
     }
 
+    /**
+     * Normalise a relative or absolute URL to an absolute, query-free URL.
+     */
     private function normalizeUrl(string $url): ?string
     {
         if (! str_starts_with($url, 'http')) {
@@ -208,11 +272,16 @@ final class OtodomProvider implements ListingProviderInterface
         return strtok($url, '?#') ?: null;
     }
 
+    /**
+     * Determine whether an exception is a transient network error (DNS, connection refused).
+     */
     private function isNetworkError(Throwable $e): bool
     {
-        return str_contains($e->getMessage(), 'Could not resolve host')
-            || str_contains($e->getMessage(), 'cURL error 6')
-            || str_contains($e->getMessage(), 'Connection refused')
-            || str_contains($e->getMessage(), 'Network is unreachable');
+        $message = $e->getMessage();
+
+        return str_contains($message, 'Could not resolve host')
+            || str_contains($message, 'cURL error 6')
+            || str_contains($message, 'Connection refused')
+            || str_contains($message, 'Network is unreachable');
     }
 }

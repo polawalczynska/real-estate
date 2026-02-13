@@ -16,16 +16,16 @@ use Throwable;
  * AI Concierge — translates natural-language property queries
  * into structured SearchCriteriaDTO using Claude.
  *
- * Flow: "Sunny loft in Krakow under 2M" → Claude → SearchCriteriaDTO
+ * Supports two modes:
+ *  1. `parseIntent()` — single-shot query → cached SearchCriteriaDTO.
+ *  2. `converse()` — multi-turn chat with history → prose + criteria.
+ *
+ * On any AI failure, falls back to deterministic regex-based parsing
+ * so the user always gets results.
  */
 final class AiSearchService implements AiSearchInterface
 {
     use InteractsWithClaude;
-
-    private const TIMEOUT_SECONDS      = 15;
-    private const CACHE_TTL_HOURS      = 24;
-    private const MAX_CONVERSE_TOKENS  = 1024;
-    private const MAX_INTENT_TOKENS    = 512;
 
     public function __construct(
         private readonly JsonRepairService $jsonRepair,
@@ -33,6 +33,11 @@ final class AiSearchService implements AiSearchInterface
         private readonly ?string $model = null,
     ) {}
 
+    /**
+     * Parse a natural-language search query into structured criteria.
+     *
+     * Results are cached for `search_cache_ttl_hours` to avoid redundant API calls.
+     */
     public function parseIntent(string $query): SearchCriteriaDTO
     {
         $query = trim($query);
@@ -41,13 +46,20 @@ final class AiSearchService implements AiSearchInterface
             return SearchCriteriaDTO::empty();
         }
 
+        $cacheTtl = (int) config('services.anthropic.search_cache_ttl_hours', 24);
         $cacheKey = 'ai_search:' . md5(mb_strtolower($query));
 
-        return Cache::remember($cacheKey, now()->addHours(self::CACHE_TTL_HOURS), function () use ($query): SearchCriteriaDTO {
+        return Cache::remember($cacheKey, now()->addHours($cacheTtl), function () use ($query): SearchCriteriaDTO {
             return $this->callClaude($query);
         });
     }
 
+    /**
+     * Generate a conversational AI response with extracted criteria.
+     *
+     * @param  array<int, array{role: string, content: string}>  $history
+     * @return array{message: string, criteria: SearchCriteriaDTO}
+     */
     public function converse(string $userMessage, array $history = []): array
     {
         $userMessage = trim($userMessage);
@@ -66,33 +78,43 @@ final class AiSearchService implements AiSearchInterface
                 return $this->fallbackConverse($userMessage);
             }
 
+            $timeout   = (int) config('services.anthropic.search_timeout', 15);
+            $maxTokens = (int) config('services.anthropic.converse_max_tokens', 1024);
+
             $messages = [];
             foreach ($history as $entry) {
                 $messages[] = ['role' => $entry['role'], 'content' => $entry['content']];
             }
             $messages[] = ['role' => 'user', 'content' => $userMessage];
 
-            $response = Http::timeout(self::TIMEOUT_SECONDS)
+            $response = Http::timeout($timeout)
                 ->withHeaders($this->claudeHeaders($apiKey))
-                ->post(self::CLAUDE_API_URL, [
+                ->post($this->claudeApiUrl(), [
                     'model'      => $this->resolveModel(configKey: 'search_model', default: 'claude-sonnet-4-5-20250929'),
-                    'max_tokens' => self::MAX_CONVERSE_TOKENS,
+                    'max_tokens' => $maxTokens,
                     'system'     => config('ai_prompts.search.converse_system'),
                     'messages'   => $messages,
                 ]);
 
             if (! $response->successful()) {
                 Log::warning('AiSearchService: Converse API failed', ['status' => $response->status()]);
+
                 return $this->fallbackConverse($userMessage);
             }
 
             return $this->parseConverseResponse($response->json('content.0.text', ''), $userMessage);
         } catch (Throwable $e) {
             Log::error('AiSearchService: Converse exception', ['error' => $e->getMessage()]);
+
             return $this->fallbackConverse($userMessage);
         }
     }
 
+    // ─── Intent Parsing ────────────────────────────────────────────
+
+    /**
+     * Call Claude for single-shot intent parsing.
+     */
     private function callClaude(string $query): SearchCriteriaDTO
     {
         try {
@@ -102,17 +124,21 @@ final class AiSearchService implements AiSearchInterface
                 return $this->fallbackParse($query);
             }
 
-            $response = Http::timeout(self::TIMEOUT_SECONDS)
+            $timeout   = (int) config('services.anthropic.search_timeout', 15);
+            $maxTokens = (int) config('services.anthropic.search_max_tokens', 512);
+
+            $response = Http::timeout($timeout)
                 ->withHeaders($this->claudeHeaders($apiKey))
-                ->post(self::CLAUDE_API_URL, [
+                ->post($this->claudeApiUrl(), [
                     'model'      => $this->resolveModel(configKey: 'search_model', default: 'claude-sonnet-4-5-20250929'),
-                    'max_tokens' => self::MAX_INTENT_TOKENS,
+                    'max_tokens' => $maxTokens,
                     'system'     => config('ai_prompts.search.intent_system'),
                     'messages'   => [['role' => 'user', 'content' => $query]],
                 ]);
 
             if (! $response->successful()) {
                 Log::warning('AiSearchService: Intent parse failed', ['status' => $response->status()]);
+
                 return $this->fallbackParse($query);
             }
 
@@ -126,20 +152,30 @@ final class AiSearchService implements AiSearchInterface
             return SearchCriteriaDTO::fromArray($json);
         } catch (Throwable $e) {
             Log::error('AiSearchService: Exception', ['query' => $query, 'error' => $e->getMessage()]);
+
             return $this->fallbackParse($query);
         }
     }
 
+    // ─── Converse Response Parsing ─────────────────────────────────
+
+    /**
+     * Separate prose from embedded JSON in a conversational Claude response.
+     *
+     * @return array{message: string, criteria: SearchCriteriaDTO}
+     */
     private function parseConverseResponse(string $content, string $originalQuery): array
     {
         $prose = $content;
         $json  = null;
 
+        // Try fenced JSON block first
         if (preg_match('/```json\s*(\{.*?\})\s*```/s', $content, $matches)) {
             $json  = json_decode($matches[1], true);
             $prose = trim(preg_replace('/```json\s*\{.*?\}\s*```/s', '', $content));
         }
 
+        // Fall back to last bare JSON object in response
         if ($json === null) {
             $lastBrace = strrpos($content, '}');
             if ($lastBrace !== false) {
@@ -167,23 +203,52 @@ final class AiSearchService implements AiSearchInterface
         return ['message' => $prose, 'criteria' => $criteria];
     }
 
+    // ─── Deterministic Fallback Parsing ────────────────────────────
+
+    /**
+     * Regex-based fallback when Claude is unavailable or fails.
+     *
+     * Extracts city, type, price ceiling, and keywords from the query text.
+     */
     private function fallbackParse(string $query): SearchCriteriaDTO
     {
         $lower = mb_strtolower($query);
 
-        $city   = $this->detectCity($lower);
-        $type   = $this->detectType($lower);
-        $priceMax = $this->detectPriceMax($lower);
-        $keywords = $this->detectKeywords($lower);
-
         return SearchCriteriaDTO::fromArray([
-            'city'      => $city,
-            'type'      => $type,
-            'price_max' => $priceMax,
-            'keywords'  => $keywords ?: null,
+            'city'      => $this->detectCity($lower),
+            'type'      => $this->detectType($lower),
+            'price_max' => $this->detectPriceMax($lower),
+            'keywords'  => $this->detectKeywords($lower) ?: null,
             'search'    => $query,
         ]);
     }
+
+    /**
+     * Build a fallback conversational response from regex parsing.
+     *
+     * @return array{message: string, criteria: SearchCriteriaDTO}
+     */
+    private function fallbackConverse(string $userMessage): array
+    {
+        $criteria = $this->fallbackParse($userMessage);
+
+        $parts = [];
+        if ($criteria->city !== null) {
+            $parts[] = "in {$criteria->city}";
+        }
+        if ($criteria->type !== null) {
+            $parts[] = "of type {$criteria->type}";
+        }
+
+        $locationClue = $parts !== [] ? ' ' . implode(' ', $parts) : '';
+
+        return [
+            'message'  => "Let me search for spaces{$locationClue} that match your vision.",
+            'criteria' => $criteria,
+        ];
+    }
+
+    // ─── Detection Helpers ─────────────────────────────────────────
 
     private function detectCity(string $lower): ?string
     {
@@ -227,17 +292,22 @@ final class AiSearchService implements AiSearchInterface
         if (preg_match('/(?:under|below|max|up\s+to|do)\s*([\d.,]+)\s*(m|mln|million|k|tys)?/i', $lower, $m)) {
             $amount = (float) str_replace([',', ' '], ['', ''], $m[1]);
             $suffix = strtolower($m[2] ?? '');
+
             if (in_array($suffix, ['m', 'mln', 'million'], true)) {
                 $amount *= 1_000_000;
             } elseif (in_array($suffix, ['k', 'tys'], true)) {
                 $amount *= 1_000;
             }
+
             return $amount;
         }
 
         return null;
     }
 
+    /**
+     * @return list<string>
+     */
     private function detectKeywords(string $lower): array
     {
         $terms = [
@@ -253,25 +323,5 @@ final class AiSearchService implements AiSearchInterface
         }
 
         return $found;
-    }
-
-    private function fallbackConverse(string $userMessage): array
-    {
-        $criteria = $this->fallbackParse($userMessage);
-
-        $parts = [];
-        if ($criteria->city !== null) {
-            $parts[] = "in {$criteria->city}";
-        }
-        if ($criteria->type !== null) {
-            $parts[] = "of type {$criteria->type}";
-        }
-
-        $locationClue = $parts !== [] ? ' ' . implode(' ', $parts) : '';
-
-        return [
-            'message'  => "Let me search for spaces{$locationClue} that match your vision.",
-            'criteria' => $criteria,
-        ];
     }
 }

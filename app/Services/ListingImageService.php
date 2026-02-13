@@ -15,37 +15,20 @@ use Throwable;
 /**
  * Downloads external images and attaches them to listings via Spatie Media Library.
  *
- * Sends real browser headers to bypass CDN blocks, validates MIME types
- * from both HTTP headers and file contents, and supports AI-curated
- * hero/gallery selection with automatic fallback.
+ * Sends browser-like headers (from `config/scraper.php`) to bypass CDN blocks,
+ * validates MIME types from both HTTP headers and file contents, and supports
+ * AI-curated hero/gallery selection with automatic fallback.
+ *
+ * Attachment strategies (tried in order):
+ *  A. AI-selected images (hero_url + gallery_urls).
+ *  B. First N raw image URLs from DOM extraction.
  */
 final class ListingImageService implements ImageAttacherInterface
 {
     use ValidatesImageUrls;
 
-    private const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-
-    private const ACCEPTED_MIME_TYPES = [
-        'image/jpeg',
-        'image/png',
-        'image/webp',
-        'image/gif',
-        'image/jpg',
-    ];
-
-    private const HEAD_TIMEOUT_SECONDS     = 10;
-    private const DOWNLOAD_TIMEOUT_SECONDS = 30;
-    private const MIN_BODY_BYTES           = 1_000;
-    private const MAX_GALLERY_IMAGES       = 8;
-    private const MAX_FALLBACK_IMAGES      = 5;
-
     /**
-     * Attach the best images to a listing.
-     *
-     * Flow:
-     *  1. Use AI-selected images if available (hero_url + gallery_urls).
-     *  2. Fall back to the first N raw image URLs otherwise.
-     *  3. If hero_url fails to download, promote the next gallery image.
+     * {@inheritDoc}
      */
     public function attachImages(
         Listing $listing,
@@ -63,6 +46,8 @@ final class ListingImageService implements ImageAttacherInterface
         $errors       = [];
         $galleryCount = 0;
         $heroAttached = false;
+        $maxGallery   = (int) config('scraper.images.max_gallery_images', 8);
+        $maxFallback  = (int) config('scraper.images.max_fallback_images', 5);
 
         // Strategy A: AI-selected images (hero_url + gallery_urls)
         $hasAiSelection = ! empty($selectedImages['hero_url']) || ! empty($selectedImages['gallery_urls']);
@@ -79,7 +64,7 @@ final class ListingImageService implements ImageAttacherInterface
             }
 
             $heroUrl = $selectedImages['hero_url'] ?? '';
-            foreach (array_slice($selectedImages['gallery_urls'] ?? [], 0, self::MAX_GALLERY_IMAGES) as $i => $url) {
+            foreach (array_slice($selectedImages['gallery_urls'] ?? [], 0, $maxGallery) as $i => $url) {
                 if ($url === $heroUrl) {
                     continue;
                 }
@@ -96,9 +81,9 @@ final class ListingImageService implements ImageAttacherInterface
             }
         }
 
-        // Strategy B: Fallback (first 5 raw URLs)
+        // Strategy B: Fallback (first N raw URLs)
         if ($galleryCount === 0 && ! empty($fallbackUrls)) {
-            foreach (array_slice($fallbackUrls, 0, self::MAX_FALLBACK_IMAGES) as $i => $url) {
+            foreach (array_slice($fallbackUrls, 0, $maxFallback) as $i => $url) {
                 $result = $this->downloadAndAttach($listing, $url, isHero: $i === 0);
                 if ($result['success']) {
                     if ($i === 0) {
@@ -113,10 +98,10 @@ final class ListingImageService implements ImageAttacherInterface
 
         if ($errors !== []) {
             Log::warning('ListingImageService: Some images failed', [
-                'listing_id'  => $listing->id,
-                'strategy'    => $hasAiSelection ? 'ai_selected' : 'fallback',
-                'attached'    => $galleryCount,
-                'errors'      => array_slice($errors, 0, 3),
+                'listing_id' => $listing->id,
+                'strategy'   => $hasAiSelection ? 'ai_selected' : 'fallback',
+                'attached'   => $galleryCount,
+                'errors'     => array_slice($errors, 0, 3),
             ]);
         }
 
@@ -127,20 +112,35 @@ final class ListingImageService implements ImageAttacherInterface
         ];
     }
 
+    // ─── Download & Attach ─────────────────────────────────────────
+
+    /**
+     * Download an image from a URL and attach it to the listing's gallery.
+     *
+     * Performs a HEAD check first (MIME validation), then a full GET.
+     * Validates the actual file MIME via finfo after download.
+     *
+     * @return array{success: bool, error?: string, media_id?: int, is_hero: bool}
+     */
     private function downloadAndAttach(Listing $listing, string $url, bool $isHero = false): array
     {
         if (! $this->isValidImageUrl($url)) {
             return ['success' => false, 'error' => 'Invalid URL format', 'is_hero' => false];
         }
 
+        $headTimeout     = (int) config('scraper.images.head_timeout', 10);
+        $downloadTimeout = (int) config('scraper.images.download_timeout', 30);
+        $minBodyBytes    = (int) config('scraper.images.min_body_bytes', 1_000);
+        $acceptedMimes   = config('scraper.images.accepted_mimes', []);
+
         try {
-            $headResponse = Http::timeout(self::HEAD_TIMEOUT_SECONDS)->withHeaders($this->browserHeaders())->head($url);
+            $headResponse = Http::timeout($headTimeout)->withHeaders($this->browserHeaders())->head($url);
             $statusCode   = $headResponse->status();
             $contentType  = $headResponse->header('Content-Type') ?? '';
 
             if ($statusCode < 400) {
                 $mimeOk = false;
-                foreach (self::ACCEPTED_MIME_TYPES as $mime) {
+                foreach ($acceptedMimes as $mime) {
                     if (str_contains($contentType, $mime)) {
                         $mimeOk = true;
                         break;
@@ -151,7 +151,7 @@ final class ListingImageService implements ImageAttacherInterface
                 }
             }
 
-            $response  = Http::timeout(self::DOWNLOAD_TIMEOUT_SECONDS)->withHeaders($this->browserHeaders())->get($url);
+            $response  = Http::timeout($downloadTimeout)->withHeaders($this->browserHeaders())->get($url);
             $getStatus = $response->status();
 
             if ($getStatus >= 400) {
@@ -159,7 +159,7 @@ final class ListingImageService implements ImageAttacherInterface
             }
 
             $body = $response->body();
-            if (strlen($body) < self::MIN_BODY_BYTES) {
+            if (strlen($body) < $minBodyBytes) {
                 return ['success' => false, 'error' => 'Body too small (' . strlen($body) . ' bytes)', 'is_hero' => false];
             }
 
@@ -169,8 +169,9 @@ final class ListingImageService implements ImageAttacherInterface
 
             $finfo    = new \finfo(FILEINFO_MIME_TYPE);
             $realMime = $finfo->file($tmpPath);
-            if (! in_array($realMime, self::ACCEPTED_MIME_TYPES, true)) {
+            if (! in_array($realMime, $acceptedMimes, true)) {
                 @unlink($tmpPath);
+
                 return ['success' => false, 'error' => "File MIME: {$realMime}", 'is_hero' => false];
             }
 
@@ -207,13 +208,20 @@ final class ListingImageService implements ImageAttacherInterface
         }
     }
 
+    // ─── Helpers ───────────────────────────────────────────────────
+
+    /**
+     * Build browser-like request headers from config.
+     *
+     * @return array<string, string>
+     */
     private function browserHeaders(): array
     {
         return [
-            'User-Agent'       => self::USER_AGENT,
-            'Accept'           => 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-            'Accept-Language'  => 'en-US,en;q=0.9,pl;q=0.8',
-            'Referer'          => 'https://www.otodom.pl/',
+            'User-Agent'       => config('scraper.browser_headers.user_agent'),
+            'Accept'           => config('scraper.browser_headers.accept_image'),
+            'Accept-Language'  => config('scraper.browser_headers.accept_language'),
+            'Referer'          => config('scraper.otodom.base_url', 'https://www.otodom.pl') . '/',
             'Sec-Fetch-Dest'   => 'image',
             'Sec-Fetch-Mode'   => 'no-cors',
             'Sec-Fetch-Site'   => 'cross-site',
