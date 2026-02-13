@@ -21,9 +21,9 @@ use Throwable;
 /**
  * AI normalization job — runs on the `ai` queue.
  *
- * Thin orchestrator: reads raw HTML from the skeleton listing,
- * sends it to the AI service for extraction, then delegates
- * all persistence logic to ListingService.
+ * Thin orchestrator: reads pre-extracted JSON-LD from the skeleton
+ * listing, sends it to the AI service for normalisation, then
+ * delegates all persistence logic to ListingService.
  */
 final class ProcessAiNormalizationJob implements ShouldQueue
 {
@@ -64,13 +64,22 @@ final class ProcessAiNormalizationJob implements ShouldQueue
         }
 
         try {
+            // ── Pipeline Step 1-3: Extract → AI Imputation → DTO ──
             $dto = $this->normalizeWithRetry($aiService, $listing);
 
             if ($dto === null) {
                 return;
             }
 
-            $listingService->applyNormalization($listing, $dto);
+            // ── Pipeline Step 4-6: Validate → Score → Save ────────
+            $result = $listingService->applyNormalization($listing, $dto);
+
+            Log::info('AI pipeline complete', [
+                'listing_id'    => $this->listingId,
+                'merged'        => $result['merged'],
+                'quality_score' => $result['quality_score'] ?? null,
+                'status'        => $result['status'] ?? null,
+            ]);
 
             unset($dto);
             if (function_exists('gc_collect_cycles')) {
@@ -112,6 +121,7 @@ final class ProcessAiNormalizationJob implements ShouldQueue
             'external_id' => $listing->external_id,
             'raw_html'    => $listing->raw_data['html'] ?? '',
             'raw_data'    => $listing->raw_data ?? [],
+            'json_ld'     => $listing->raw_data['json_ld'] ?? null,
         ];
 
         try {

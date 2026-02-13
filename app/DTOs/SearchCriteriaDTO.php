@@ -4,6 +4,12 @@ declare(strict_types=1);
 
 namespace App\DTOs;
 
+/**
+ * Immutable DTO representing parsed search criteria.
+ *
+ * Built from AI intent parsing or manual filter forms, then passed
+ * to SearchService for Eloquent query construction.
+ */
 readonly class SearchCriteriaDTO
 {
     public function __construct(

@@ -13,6 +13,7 @@ enum PropertyType: string
     case STUDIO = 'studio';
     case PENTHOUSE = 'penthouse';
     case VILLA = 'villa';
+    case UNKNOWN = 'unknown';
 
     public function label(): string
     {
@@ -24,6 +25,15 @@ enum PropertyType: string
             self::STUDIO => 'Studio',
             self::PENTHOUSE => 'Penthouse',
             self::VILLA => 'Villa',
+            self::UNKNOWN => 'Unknown',
         };
+    }
+
+    /**
+     * Resolve a string value to a PropertyType, falling back to UNKNOWN.
+     */
+    public static function fromSafe(string $value): self
+    {
+        return self::tryFrom($value) ?? self::UNKNOWN;
     }
 }
