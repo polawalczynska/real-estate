@@ -8,7 +8,6 @@ use App\DTOs\ListingDTO;
 use App\Enums\ListingStatus;
 use App\Enums\PropertyType;
 use App\Models\Listing;
-use App\Services\Ai\HtmlExtractorService;
 use Illuminate\Support\Facades\Log;
 use Spatie\MediaLibrary\MediaCollections\Models\Media;
 
@@ -16,33 +15,44 @@ use Spatie\MediaLibrary\MediaCollections\Models\Media;
  * Central domain service for listing persistence and lifecycle.
  *
  * Owns: skeleton creation, pre-AI dedup, post-AI normalisation
- * application, duplicate merging, and hero-image designation.
+ * application, quality scoring, duplicate merging, and hero-image designation.
+ *
+ * This service is the single authority on "how a listing gets into the DB".
+ * Controllers, commands, and jobs delegate all persistence logic here.
  */
 final class ListingService
 {
+    /** Price must change by more than 0.5 % to trigger an update on duplicates. */
     private const PRICE_CHANGE_TOLERANCE = 0.005;
 
     public function __construct(
         private readonly Listing $listing,
-        private readonly HtmlExtractorService $htmlExtractor,
+        private readonly QualityScoreService $qualityScore,
     ) {}
 
+    // ─── Skeleton Creation (Phase 1) ───────────────────────────────
+
     /**
-     * Create a minimal listing record that appears on site immediately.
+     * Create a listing record populated with JSON-LD data when available.
      *
-     * Before creating the skeleton, calculates a semantic fingerprint
-     * from raw HTML metadata and checks for recent duplicates.
-     * If a duplicate is found the AI/media pipeline is skipped entirely.
+     * Phase 1 data (JSON-LD) provides accurate price, city, area, and rooms
+     * for a meaningful fingerprint BEFORE any AI call. This enables reliable
+     * pre-AI deduplication and richer skeleton records.
      *
+     * @param  array<string, mixed>  $scrapedData  Raw data from the provider.
      * @return array{listing: Listing, is_new: bool, is_fingerprint_duplicate: bool}
      */
     public function createSkeleton(array $scrapedData): array
     {
         $externalId = $scrapedData['external_id'];
         $rawHtml    = $scrapedData['raw_html'] ?? '';
+        $jsonLd     = $scrapedData['json_ld'] ?? null;
 
-        $fingerprint = $this->calculatePreAiFingerprint($rawHtml);
+        $fingerprint = $jsonLd !== null
+            ? $this->calculateJsonLdFingerprint($jsonLd)
+            : null;
 
+        // ── Pre-AI deduplication via fingerprint ─────────────────
         if ($fingerprint !== null) {
             $duplicate = $this->listing
                 ->newQuery()
@@ -52,7 +62,7 @@ final class ListingService
             if ($duplicate !== null) {
                 $this->refreshDuplicate($duplicate, $scrapedData);
 
-                Log::info('Semantic duplicate detected — skipping AI processing.', [
+                Log::debug('Semantic duplicate detected — skipping AI processing.', [
                     'fingerprint' => $fingerprint,
                     'existing_id' => $duplicate->id,
                     'external_id' => $externalId,
@@ -66,6 +76,7 @@ final class ListingService
             }
         }
 
+        // ── External-ID deduplication ────────────────────────────
         $existing = $this->listing
             ->newQuery()
             ->where('external_id', $externalId)
@@ -81,25 +92,32 @@ final class ListingService
             ];
         }
 
+        // ── Create skeleton ──────────────────────────────────────
+        $rawDataPayload = [
+            'html'             => $rawHtml,
+            'url'              => $scrapedData['url'] ?? '',
+            'extracted_images' => $scrapedData['extracted_images'] ?? [],
+            'scraped_at'       => $scrapedData['scraped_at'] ?? now()->toIso8601String(),
+        ];
+
+        if ($jsonLd !== null) {
+            $rawDataPayload['json_ld'] = $jsonLd;
+        }
+
         $listing = $this->listing->create([
             'external_id'  => $externalId,
             'fingerprint'  => $fingerprint,
-            'title'        => $scrapedData['title'] ?: 'Property Listing',
-            'description'  => '',
-            'price'        => 0,
-            'currency'     => 'PLN',
-            'area_m2'      => 0,
-            'rooms'        => 0,
-            'city'         => '',
-            'street'       => null,
-            'type'         => PropertyType::APARTMENT->value,
+            'title'        => data_get($jsonLd, 'title', $scrapedData['title'] ?? '') ?: 'Property Listing',
+            'description'  => data_get($jsonLd, 'description', ''),
+            'price'        => data_get($jsonLd, 'price', 0),
+            'currency'     => data_get($jsonLd, 'currency', 'PLN'),
+            'area_m2'      => data_get($jsonLd, 'area_m2', 0),
+            'rooms'        => data_get($jsonLd, 'rooms', 0),
+            'city'         => data_get($jsonLd, 'city', ''),
+            'street'       => data_get($jsonLd, 'street'),
+            'type'         => data_get($jsonLd, 'type') ?? PropertyType::APARTMENT->value,
             'status'       => ListingStatus::PENDING->value,
-            'raw_data'     => [
-                'html'             => $rawHtml,
-                'url'              => $scrapedData['url'] ?? '',
-                'extracted_images' => $scrapedData['extracted_images'] ?? [],
-                'scraped_at'       => $scrapedData['scraped_at'] ?? now()->toIso8601String(),
-            ],
+            'raw_data'     => $rawDataPayload,
             'last_seen_at' => now(),
         ]);
 
@@ -110,24 +128,34 @@ final class ListingService
         ];
     }
 
+    // ─── AI Normalisation Application (Phase 2) ────────────────────
+
     /**
      * Apply AI-normalised data to a skeleton listing.
      *
-     * Performs post-AI duplicate detection, determines the correct
-     * status, persists normalised fields, and updates hero designation.
+     * Pipeline:
+     *  1. Post-AI duplicate detection (merge if found).
+     *  2. DTO Validation — check critical fields (price, area, city).
+     *  3. Quality Scoring — score data completeness (0–100).
+     *  4. Status Resolution — AVAILABLE / INCOMPLETE / FAILED.
+     *  5. Persist normalised fields, score, and status.
+     *  6. Update hero-image designation.
      *
-     * @return array{merged: bool}  merged=true when skeleton was a duplicate and was deleted.
+     * @return array{merged: bool, quality_score: int, status: string}
      */
     public function applyNormalization(Listing $skeleton, ListingDTO $dto): array
     {
         if ($this->mergePostAiDuplicate($skeleton, $dto)) {
-            return ['merged' => true];
+            return ['merged' => true, 'quality_score' => 0, 'status' => 'merged'];
         }
 
-        $status = $this->determinePostAiStatus($dto);
+        // ── Validate → Score → Resolve Status ───────────────────
+        $resolvedStatus = $this->qualityScore->applyToListing($skeleton, $dto);
+        $finalStatus    = $resolvedStatus;
 
+        // ── Persist normalised fields ────────────────────────────
         $rawData        = is_array($skeleton->raw_data) ? $skeleton->raw_data : [];
-        $selectedImages = $dto->rawData['selected_images'] ?? null;
+        $selectedImages = data_get($dto->rawData, 'selected_images');
 
         if ($selectedImages !== null) {
             $rawData['selected_images'] = $selectedImages;
@@ -135,34 +163,46 @@ final class ListingService
         $rawData['extracted_images'] = $dto->images ?? $rawData['extracted_images'] ?? [];
 
         $skeleton->update([
-            'title'       => $dto->title,
-            'description' => $dto->description,
-            'price'       => $dto->price,
-            'currency'    => $dto->currency,
-            'area_m2'     => $dto->areaM2,
-            'rooms'       => $dto->rooms,
-            'city'        => $dto->city,
-            'street'      => $dto->street,
-            'type'        => $dto->type->value,
-            'status'      => $status->value,
-            'fingerprint' => $dto->fingerprint(),
-            'keywords'    => $dto->keywords,
-            'images'      => $dto->images,
-            'raw_data'    => $rawData,
+            'title'           => $dto->title,
+            'description'     => $dto->description,
+            'price'           => $dto->price,
+            'currency'        => $dto->currency,
+            'area_m2'         => $dto->areaM2,
+            'rooms'           => $dto->rooms,
+            'city'            => $dto->city,
+            'street'          => $dto->street,
+            'type'            => $dto->type->value,
+            'status'          => $finalStatus->value,
+            'quality_score'   => $dto->qualityScore(),
+            'is_fully_parsed' => $dto->isFullyParsed(),
+            'fingerprint'     => $dto->fingerprint(),
+            'keywords'        => $dto->keywords,
+            'images'          => $dto->images,
+            'raw_data'        => $rawData,
         ]);
 
+        // ── Hero designation ─────────────────────────────────────
         $this->updateHeroDesignation($skeleton, $selectedImages);
 
-        Log::info("AI normalization applied — listing [{$skeleton->id}] is now {$status->value}.", [
-            'listing_id' => $skeleton->id,
-            'status'     => $status->value,
+        Log::debug("AI normalization applied — listing [{$skeleton->id}]", [
+            'listing_id'      => $skeleton->id,
+            'status'          => $finalStatus->value,
+            'quality_score'   => $dto->qualityScore(),
+            'is_fully_parsed' => $dto->isFullyParsed(),
+            'is_valid'        => $dto->isValid(),
         ]);
 
-        return ['merged' => false];
+        return [
+            'merged'        => false,
+            'quality_score' => $dto->qualityScore(),
+            'status'        => $finalStatus->value,
+        ];
     }
 
+    // ─── Status Management ─────────────────────────────────────────
+
     /**
-     * Mark a listing as unverified when all AI retries are exhausted.
+     * Mark a listing as UNVERIFIED when all AI retries are exhausted.
      */
     public function markUnverified(int $listingId): void
     {
@@ -173,11 +213,14 @@ final class ListingService
         }
     }
 
+    // ─── Post-AI Upsert ────────────────────────────────────────────
+
     /**
-     * Post-AI upsert with fingerprint + external_id dedup.
+     * Upsert a listing with fingerprint + external_id dedup.
      *
      * Safety net for edge cases where the AI produced more accurate
      * city/street values, changing the fingerprint after skeleton creation.
+     * Includes quality scoring and status validation.
      *
      * @return array{listing: Listing, is_duplicate: bool}
      */
@@ -185,6 +228,9 @@ final class ListingService
     {
         $attributes  = $dto->toArray();
         $fingerprint = $dto->fingerprint();
+
+        // Override status with validation-aware resolution
+        $attributes['status'] = $dto->resolveStatus()->value;
 
         $duplicate = $this->listing
             ->newQuery()
@@ -198,9 +244,10 @@ final class ListingService
         if ($duplicate !== null) {
             $duplicate->update(array_merge($attributes, ['last_seen_at' => now()]));
 
-            Log::info('Post-AI semantic duplicate merged.', [
-                'listing_id'  => $duplicate->id,
-                'fingerprint' => $fingerprint,
+            Log::debug('Post-AI semantic duplicate merged.', [
+                'listing_id'    => $duplicate->id,
+                'fingerprint'   => $fingerprint,
+                'quality_score' => $dto->qualityScore(),
             ]);
 
             return ['listing' => $duplicate->fresh(), 'is_duplicate' => true];
@@ -226,41 +273,54 @@ final class ListingService
         return ['listing' => $listing, 'is_duplicate' => false];
     }
 
-    private function calculatePreAiFingerprint(string $rawHtml): ?string
+    // ─── Fingerprint Calculation ───────────────────────────────────
+
+    /**
+     * Calculate a semantic fingerprint from JSON-LD data.
+     *
+     * Returns null if the data lacks enough information (no price AND no city),
+     * preventing false-positive matches on empty data.
+     */
+    private function calculateJsonLdFingerprint(array $jsonLd): ?string
     {
-        if ($rawHtml === '') {
+        $price = (float) ($jsonLd['price'] ?? 0);
+        $city  = (string) ($jsonLd['city'] ?? '');
+
+        if ($price <= 0 && $city === '') {
             return null;
         }
 
-        $meta = $this->htmlExtractor->extractStructuredMetadata($rawHtml);
-
-        if ($meta['price'] <= 0 && $meta['city'] === '') {
-            return null;
-        }
-
-        return FingerprintService::fromRawMetadata($meta);
+        return FingerprintService::calculate(
+            city:   $city,
+            street: $jsonLd['street'] ?? null,
+            price:  $price,
+            areaM2: (float) ($jsonLd['area_m2'] ?? 0),
+            rooms:  (int) ($jsonLd['rooms'] ?? 0),
+        );
     }
 
+    // ─── Duplicate Handling ────────────────────────────────────────
+
+    /**
+     * Refresh a known duplicate: update last_seen_at and detect price changes.
+     */
     private function refreshDuplicate(Listing $existing, array $scrapedData): void
     {
         $updates = ['last_seen_at' => now()];
+        $jsonLd  = $scrapedData['json_ld'] ?? null;
 
-        $rawHtml = $scrapedData['raw_html'] ?? '';
-        if ($rawHtml !== '') {
-            $meta = $this->htmlExtractor->extractStructuredMetadata($rawHtml);
-            if ($meta['price'] > 0) {
-                $oldPrice = (float) $existing->price;
-                $newPrice = $meta['price'];
+        if ($jsonLd !== null && ($jsonLd['price'] ?? 0) > 0) {
+            $oldPrice = (float) $existing->price;
+            $newPrice = (float) $jsonLd['price'];
 
-                if ($oldPrice > 0 && abs($newPrice - $oldPrice) / $oldPrice > self::PRICE_CHANGE_TOLERANCE) {
-                    $updates['price'] = $newPrice;
+            if ($oldPrice > 0 && abs($newPrice - $oldPrice) / $oldPrice > self::PRICE_CHANGE_TOLERANCE) {
+                $updates['price'] = $newPrice;
 
-                    Log::info('Duplicate price updated.', [
-                        'listing_id' => $existing->id,
-                        'old_price'  => $oldPrice,
-                        'new_price'  => $newPrice,
-                    ]);
-                }
+                Log::debug('Duplicate price updated.', [
+                    'listing_id' => $existing->id,
+                    'old_price'  => $oldPrice,
+                    'new_price'  => $newPrice,
+                ]);
             }
         }
 
@@ -268,7 +328,7 @@ final class ListingService
     }
 
     /**
-     * Check for a cross-platform duplicate using the AI-refined fingerprint.
+     * Detect a cross-platform duplicate using the AI-refined fingerprint.
      *
      * If found: updates the existing record and deletes the skeleton.
      */
@@ -302,14 +362,7 @@ final class ListingService
         return true;
     }
 
-    private function determinePostAiStatus(ListingDTO $dto): ListingStatus
-    {
-        if ($dto->price === 0.0 || $dto->areaM2 === 0.0 || $dto->city === 'Unknown') {
-            return ListingStatus::UNVERIFIED;
-        }
-
-        return ListingStatus::AVAILABLE;
-    }
+    // ─── Hero Image ────────────────────────────────────────────────
 
     /**
      * Re-designate the hero image based on AI curation.

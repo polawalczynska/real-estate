@@ -62,9 +62,10 @@ final class DownloadListingImagesJob implements ShouldQueue
             $selectedImages = $rawData['selected_images'] ?? null;
 
             $fallbackUrls = array_map(
-                static fn (array $img): string => $img['url'],
+                static fn (array|string $img): string => is_array($img) ? ($img['url'] ?? '') : (string) $img,
                 $this->extractedImages,
             );
+            $fallbackUrls = array_values(array_filter($fallbackUrls));
 
             if (empty($fallbackUrls)) {
                 $fallbackUrls = $rawData['extracted_images'] ?? [];
@@ -84,7 +85,7 @@ final class DownloadListingImagesJob implements ShouldQueue
 
             $listing->touch();
 
-            Log::info("Image download complete — listing [{$this->listingId}] has {$attachmentSummary['gallery_count']} images.", [
+            Log::debug("Image download complete — listing [{$this->listingId}] has {$attachmentSummary['gallery_count']} images.", [
                 'listing_id'    => $this->listingId,
                 'gallery_count' => $attachmentSummary['gallery_count'],
             ]);

@@ -4,19 +4,25 @@ declare(strict_types=1);
 
 namespace App\Services\Ai;
 
+use App\Services\Concerns\HandlesDataCleaning;
 use DOMDocument;
 use DOMXPath;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
 /**
- * Extracts structured content and image metadata from raw listing HTML.
+ * Phase 1 extractor: pulls structured content and image metadata from raw listing HTML.
  *
- * Uses DOM plucking to reduce token usage by 60-80 % while preserving
- * the data the AI needs for normalization and image curation.
+ * Two extraction modes:
+ *  1. `extractJsonLd()` — deterministic structured data for skeleton creation and fingerprinting.
+ *  2. `extractContent()` — condensed DOM plucking to reduce AI token usage by 60–80%.
+ *
+ * All constants (limits, sizes) are class-level for easy tuning.
+ * Street prefixes are stripped via the HandlesDataCleaning trait.
  */
 final class HtmlExtractorService
 {
+    use HandlesDataCleaning;
     private const MAX_HTML_BYTES      = 500_000;
     private const MAX_IMAGES          = 15;
     private const MAX_TEXT_CHARS      = 6_000;
@@ -36,7 +42,11 @@ final class HtmlExtractorService
     private array $lastExtractedImages = [];
 
     /**
-     * Condense a full-page HTML into a compact text representation.
+     * Condense full-page HTML into a compact text representation for AI normalisation.
+     *
+     * Plucks title, price, specs, description, location, and images from the DOM,
+     * then joins them into a token-efficient string. Falls back to raw truncation
+     * if DOM parsing fails.
      */
     public function extractContent(string $html): string
     {
@@ -136,6 +146,77 @@ final class HtmlExtractorService
         }
 
         return 'Property Listing';
+    }
+
+    /**
+     * Extract structured listing data from JSON-LD embedded in HTML.
+     *
+     * Uses JSON-LD for structured fields and DOM for image extraction.
+     * Returns null if no usable JSON-LD is found.
+     *
+     * @return array{
+     *     title: string,
+     *     description: string,
+     *     price: float,
+     *     currency: string,
+     *     city: string,
+     *     street: string|null,
+     *     rooms: int,
+     *     area_m2: float,
+     *     type: string|null,
+     *     external_id: string|null,
+     *     images: string[],
+     *     url: string,
+     *     json_ld_raw: array,
+     * }|null
+     */
+    public function extractJsonLd(string $html): ?array
+    {
+        $graphNode = $this->findListingGraphNode($html);
+
+        if ($graphNode === null) {
+            return null;
+        }
+
+        $price    = $this->parseJsonLdPrice($graphNode);
+        $currency = (string) data_get($graphNode, 'offers.priceCurrency', 'PLN');
+        $areaM2   = $this->parseJsonLdArea($graphNode);
+        $rooms    = (int) data_get($graphNode, 'numberOfRooms', 0);
+        $city     = (string) data_get($graphNode, 'address.addressLocality', '');
+        $street   = $this->parseJsonLdStreet($graphNode);
+        $type     = $this->parseJsonLdPropertyType($graphNode);
+
+        // Use DOM-based image extraction for better coverage
+        $images = $this->extractImagesFromDom($html);
+
+        $url        = (string) data_get($graphNode, 'url', '');
+        $externalId = $this->extractExternalIdFromUrl($url);
+
+        $extractedData = [
+            'title'       => (string) data_get($graphNode, 'name', 'Property Listing'),
+            'description' => (string) data_get($graphNode, 'description', ''),
+            'price'       => $price,
+            'currency'    => $currency,
+            'city'        => $city,
+            'street'      => $street,
+            'rooms'       => $rooms,
+            'area_m2'     => $areaM2,
+            'type'        => $type,
+            'external_id' => $externalId,
+            'images'      => $images,
+            'url'         => $url,
+            'json_ld_raw' => $graphNode,
+        ];
+
+        Log::debug('JSON-LD data extracted', [
+            'street'  => $street,
+            'city'    => $city,
+            'price'   => $price,
+            'area_m2' => $areaM2,
+            'rooms'   => $rooms,
+        ]);
+
+        return $extractedData;
     }
 
     // ─── DOM Helpers ────────────────────────────────────────────
@@ -505,5 +586,185 @@ final class HtmlExtractorService
         $combined = trim(implode(' ', array_filter([$alt, $title, $aria, $parentLabel])));
 
         return $combined !== '' ? $combined : 'Property image';
+    }
+
+    // ─── DOM-based Image Extraction (for extractJsonLd) ─────────
+
+    /**
+     * Extract image URLs from HTML using DOM parsing.
+     *
+     * @return string[]
+     */
+    private function extractImagesFromDom(string $html): array
+    {
+        try {
+            $xpath  = $this->loadDom($this->truncateHtml($html));
+            $images = $this->pluckImages($xpath);
+            unset($xpath);
+
+            return array_values(array_unique(
+                array_map(static fn (array $img): string => $img['url'], $images),
+            ));
+        } catch (Throwable $e) {
+            Log::warning('HtmlExtractor: DOM image extraction failed', ['error' => $e->getMessage()]);
+
+            return [];
+        }
+    }
+
+    // ─── JSON-LD Graph Traversal ───────────────────────────────
+
+    private function findListingGraphNode(string $html): ?array
+    {
+        if (! preg_match_all('/<script[^>]*type=["\']application\/ld\+json["\'][^>]*>(.*?)<\/script>/si', $html, $matches)) {
+            return null;
+        }
+
+        foreach ($matches[1] as $jsonString) {
+            $decoded = json_decode(trim($jsonString), true);
+
+            if (! is_array($decoded)) {
+                continue;
+            }
+
+            if ($this->isListingNode($decoded)) {
+                return $decoded;
+            }
+
+            $graph = $decoded['@graph'] ?? [];
+            if (! is_array($graph)) {
+                continue;
+            }
+
+            foreach ($graph as $node) {
+                if (is_array($node) && $this->isListingNode($node)) {
+                    return $node;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private function isListingNode(array $node): bool
+    {
+        $types = (array) ($node['@type'] ?? []);
+
+        $listingTypes = ['Product', 'Apartment', 'Residence', 'House', 'SingleFamilyResidence', 'RealEstateListing'];
+
+        foreach ($types as $type) {
+            if (in_array($type, $listingTypes, true)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // ─── JSON-LD Field Parsers ──────────────────────────────────
+
+    private function parseJsonLdPrice(array $node): float
+    {
+        $raw = data_get($node, 'offers.price')
+            ?? data_get($node, 'offers.0.price')
+            ?? data_get($node, 'price')
+            ?? '0';
+
+        return (float) preg_replace('/[^\d.]/', '', (string) $raw);
+    }
+
+    private function parseJsonLdArea(array $node): float
+    {
+        $properties = data_get($node, 'additionalProperty', []);
+
+        if (is_array($properties)) {
+            foreach ($properties as $prop) {
+                $name = data_get($prop, 'name', '');
+                if (preg_match('/powierzchnia|area|floor\s*area/iu', $name)) {
+                    $value = (string) data_get($prop, 'value', '0');
+
+                    return (float) str_replace(',', '.', preg_replace('/[^\d.,]/', '', $value));
+                }
+            }
+        }
+
+        $floorSize = data_get($node, 'floorSize.value')
+            ?? data_get($node, 'floorSize')
+            ?? null;
+
+        if ($floorSize !== null) {
+            return (float) str_replace(',', '.', preg_replace('/[^\d.,]/', '', (string) $floorSize));
+        }
+
+        return 0.0;
+    }
+
+    private function parseJsonLdStreet(array $node): ?string
+    {
+        $raw = data_get($node, 'address.streetAddress');
+
+        if ($raw === null || trim((string) $raw) === '') {
+            return null;
+        }
+
+        return $this->stripStreetPrefix((string) $raw);
+    }
+
+    private function parseJsonLdPropertyType(array $node): ?string
+    {
+        // Prefer portal-specific "Rodzaj zabudowy" (more granular than schema @type)
+        $properties = data_get($node, 'additionalProperty', []);
+
+        if (is_array($properties)) {
+            foreach ($properties as $prop) {
+                if (preg_match('/rodzaj\s*zabudowy|building\s*type/iu', (string) data_get($prop, 'name', ''))) {
+                    $value = mb_strtolower(trim((string) data_get($prop, 'value', '')));
+
+                    return match (true) {
+                        str_contains($value, 'apartament') => 'apartment',
+                        str_contains($value, 'blok')       => 'apartment',
+                        str_contains($value, 'kamienica')   => 'apartment',
+                        str_contains($value, 'loft')        => 'loft',
+                        str_contains($value, 'dom')         => 'house',
+                        str_contains($value, 'willa')       => 'villa',
+                        str_contains($value, 'szeregowiec') => 'townhouse',
+                        str_contains($value, 'penthouse')   => 'penthouse',
+                        default                             => 'apartment',
+                    };
+                }
+            }
+        }
+
+        // Fallback: schema.org @type
+        $types = (array) ($node['@type'] ?? []);
+
+        $typeMap = [
+            'Apartment'             => 'apartment',
+            'House'                 => 'house',
+            'SingleFamilyResidence' => 'house',
+            'Residence'             => 'apartment',
+        ];
+
+        foreach ($types as $type) {
+            if (isset($typeMap[$type])) {
+                return $typeMap[$type];
+            }
+        }
+
+        return 'apartment';
+    }
+
+    private function extractExternalIdFromUrl(string $url): ?string
+    {
+        // Otodom URLs end with an ID like: /oferta/tytul-oferty-ID4zZIU
+        if (preg_match('/[-\/]([A-Za-z0-9]{6,12})(?:[?#]|$)/', $url, $m)) {
+            return 'otodom_' . $m[1];
+        }
+
+        if ($url !== '') {
+            return 'otodom_' . md5($url);
+        }
+
+        return null;
     }
 }
