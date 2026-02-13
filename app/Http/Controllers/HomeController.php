@@ -15,6 +15,7 @@ final class HomeController extends Controller
             ->select(Listing::CARD_COLUMNS)
             ->with('media')
             ->available()
+            ->orderByDesc('quality_score')
             ->orderByDesc('created_at')
             ->limit(3)
             ->get();

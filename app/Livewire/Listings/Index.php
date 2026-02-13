@@ -178,10 +178,10 @@ class Index extends Component
             'search',
             'keywords',
         ]);
-        
+
         $this->sort = 'newest';
         $this->resetPage();
-        
+
         $this->formKey++;
     }
 

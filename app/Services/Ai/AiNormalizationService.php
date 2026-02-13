@@ -179,13 +179,39 @@ final class AiNormalizationService implements AiNormalizerInterface
         }
 
         $lines = [];
-        foreach ($images as $i => $img) {
+        $index = 0;
+        foreach ($images as $img) {
             $url   = is_array($img) ? ($img['url'] ?? '') : (string) $img;
             $label = is_array($img) ? ($img['label'] ?? 'Property image') : 'Property image';
 
-            if ($url !== '') {
-                $lines[] = ($i + 1) . '. ' . $url . " (Label: {$label})";
+            if ($url === '') {
+                continue;
             }
+
+            // Filter out logos based on label (alt text, title, aria-label)
+            $labelLower = mb_strtolower($label);
+            $logoKeywords = ['logo', 'brand', 'watermark', 'agency', 'company', 'firm', 'biuro'];
+            foreach ($logoKeywords as $keyword) {
+                if (str_contains($labelLower, $keyword)) {
+                    continue 2; // Skip this image
+                }
+            }
+
+            // Additional check: filter URLs containing logo keywords
+            $urlLower = mb_strtolower($url);
+            foreach ($logoKeywords as $keyword) {
+                if (str_contains($urlLower, $keyword)) {
+                    continue 2; // Skip this image
+                }
+            }
+
+            // Validate URL using existing validation
+            if (! $this->isValidImageUrl($url)) {
+                continue;
+            }
+
+            $index++;
+            $lines[] = "{$index}. {$url} (Label: {$label})";
         }
 
         if ($lines === []) {

@@ -26,7 +26,7 @@
 
                 <div class="hidden md:flex items-center gap-8">
                             <a href="{{ route('listings.index') }}" wire:navigate class="text-sm font-light text-zinc-600 hover:text-zinc-900 transition-colors">
-                                Browse Properties
+                                Browse
                             </a>
                     <flux:button variant="ghost" size="sm">
                         Sign In
@@ -74,7 +74,7 @@
                     @click="mobileNav = false"
                     class="block text-sm font-light text-zinc-600 hover:text-zinc-900 transition-colors tracking-wide"
                 >
-                    Browse Properties
+                    Browse
                 </a>
             </nav>
         </div>

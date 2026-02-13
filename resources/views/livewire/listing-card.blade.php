@@ -45,12 +45,12 @@
                 wire:key="listing-media-{{ $listing->id }}-{{ $mediaCount }}"
             >
                 @if($listing->hasHeroImage())
-                    <img
-                        src="{{ $listing->getHeroImageUrl('card') }}"
-                        alt="{{ $listing->title }}"
+                <img
+                    src="{{ $listing->getHeroImageUrl('card') }}"
+                    alt="{{ $listing->title }}"
                         class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                        loading="lazy"
-                    >
+                    loading="lazy"
+                >
                 @elseif($mediaCount === 0)
                     <x-ui.placeholder-image
                         class="w-full h-full"
@@ -73,7 +73,11 @@
                     </p>
 
                     <p class="text-xs uppercase tracking-wider text-zinc-600 font-light">
-                        {{ $listing->city }}@if($listing->street), {{ $listing->street }}@endif
+                        @if($listing->street)
+                            {{ $listing->street }}, {{ $listing->city }}
+                        @else
+                            {{ $listing->city }}
+                        @endif
                     </p>
 
                     @if(!empty($listing->keywords))

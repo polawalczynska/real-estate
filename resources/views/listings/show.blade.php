@@ -5,12 +5,13 @@
 @section('content')
     @php
         $isPending    = $listing->isPending();
-        $gallery      = $listing->getMedia('gallery');
-        $heroMedia    = $listing->getHeroMedia();
-        $detailImages = $gallery->filter(fn ($m) => $m->id !== $heroMedia?->id)->take(4);
+        $galleryUrls  = $listing->getGalleryImageUrls();
+        $heroUrl      = $listing->getHeroImageUrl();
+        $detailImages = array_filter($galleryUrls, fn ($url) => $url !== $heroUrl);
+        $detailImages = array_slice($detailImages, 0, 4);
         $offerUrl     = $listing->raw_data['url'] ?? null;
         $hasHero      = $listing->hasHeroImage();
-        $mediaCount   = $gallery->count();
+        $mediaCount   = count($galleryUrls);
     @endphp
 
     <div class="container mx-auto max-w-7xl px-6 pt-8">
@@ -186,14 +187,14 @@
                             @endfor
                         </div>
                     </div>
-                @elseif($detailImages->isNotEmpty())
+                @elseif(!empty($detailImages))
                     <div>
                         <h2 class="text-xs uppercase tracking-[0.2em] text-zinc-400 mb-4">Gallery</h2>
                         <div class="grid grid-cols-2 gap-3">
-                            @foreach($detailImages as $media)
+                            @foreach($detailImages as $imageUrl)
                                 <div class="aspect-[4/3] overflow-hidden bg-zinc-100">
                                     <img
-                                        src="{{ $media->getUrl('card') ?: $media->getUrl() }}"
+                                        src="{{ $imageUrl }}"
                                         alt="{{ $listing->title }}"
                                         class="w-full h-full object-cover hover:scale-105 transition-transform duration-500"
                                         loading="lazy"

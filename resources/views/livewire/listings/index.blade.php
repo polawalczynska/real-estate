@@ -18,14 +18,14 @@
                         @click="filtersOpen = !filtersOpen"
                         class="w-full flex items-center justify-between lg:pointer-events-none"
                     >
-                        <div>
+                    <div>
                             <p class="text-[0.7rem] tracking-[0.3em] uppercase text-zinc-500 mb-2 text-left">
-                                FILTERS
-                            </p>
-                            <h2 class="text-xl font-light tracking-[0.1em] text-zinc-900">
-                                Refine Search
-                            </h2>
-                        </div>
+                            FILTERS
+                        </p>
+                        <h2 class="text-xl font-light tracking-[0.1em] text-zinc-900">
+                            Refine Search
+                        </h2>
+                    </div>
                         <svg
                             class="w-5 h-5 text-zinc-400 transition-transform duration-200 lg:hidden"
                             :class="filtersOpen && 'rotate-180'"
@@ -216,8 +216,8 @@
                             <livewire:listing-card
                                 :listing="$listing"
                                 :is-pending="$listing->isPending()"
-                                :media-count="$listing->getMedia('gallery')->count()"
-                                :key="'listing-' . $listing->id . '-' . $listing->getMedia('gallery')->count()"
+                                :media-count="count($listing->getGalleryImageUrls())"
+                                :key="'listing-' . $listing->id . '-' . count($listing->getGalleryImageUrls())"
                             />
                         </div>
                     @empty

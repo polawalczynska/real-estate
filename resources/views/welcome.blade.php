@@ -94,9 +94,9 @@
                         <div class="aspect-[4/3] overflow-hidden bg-zinc-100 relative">
                             @if($listing->hasHeroImage())
                                 {{-- State 1: Real image --}}
-                                <img
-                                    src="{{ $listing->getHeroImageUrl('card') }}"
-                                    alt="{{ $listing->title }}"
+                            <img 
+                                src="{{ $listing->getHeroImageUrl('card') }}" 
+                                alt="{{ $listing->title }}"
                                     class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                                     loading="lazy"
                                 >
@@ -115,7 +115,7 @@
                         <div class="p-5 flex-1 flex flex-col justify-between space-y-3">
                             <div class="space-y-2">
                                 <p class="text-xs uppercase tracking-[0.25em] text-zinc-500">
-                                    {{ $listing->city }}@if($listing->street), {{ $listing->street }}@endif
+                                    {{ $listing->city }}
                                 </p>
                                 <p class="text-sm font-light text-zinc-900 line-clamp-2">
                                     {{ $listing->title }}
