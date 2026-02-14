@@ -45,7 +45,7 @@ Real estate portals embed JSON-LD structured data. The extractor relies on `@typ
 3. System displays filtered listings
 4. User clicks a listing card → views full details with gallery
 
-**Journey 2 — Filter-Based Discovery**
+**Journey 2: Filter-Based Discovery**
 1. User browses the listings page and applies filters: price range, area, rooms, city, property type
 2. Eloquent scopes query indexed structured metadata
 3. User clicks a listing card → views full details with gallery
