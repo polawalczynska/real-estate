@@ -9,7 +9,7 @@ use App\Enums\PropertyType;
 /**
  * Structured title building and validation.
  *
- * Format: "[N]-Bedroom [Type] in [City]" or "[N]-Bedroom [Type] on [Street] in [City]".
+ * Format: "[N]-Room [Type] in [City]" or "[N]-Room [Type] on [Street] in [City]".
  * Used both by the AI pipeline (to validate AI output) and the local fallback
  * (to build titles when AI fails or returns non-conforming text).
  */
@@ -33,7 +33,7 @@ trait NormalizesTitle
             $parts[] = $typeLabel !== '' ? $typeLabel : 'Studio';
         } else {
             if ($rooms > 0) {
-                $parts[] = $rooms . '-Bedroom';
+                $parts[] = $rooms . '-Room';
             }
             if ($typeLabel !== '') {
                 $parts[] = $typeLabel;
@@ -72,7 +72,7 @@ trait NormalizesTitle
     /**
      * Check whether an AI-returned title already follows the structured format.
      *
-     * Looks for natural language patterns like "Bedroom", "in [City]", "on [Street]".
+     * Looks for natural language patterns like "Room", "in [City]", "on [Street]".
      * Rejects titles that still contain marketing fluff.
      */
     private function isStructuredTitle(string $title): bool
