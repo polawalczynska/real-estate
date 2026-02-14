@@ -1,6 +1,6 @@
 ### Data Extraction
 
-Structured metadata (title, price, area, rooms, city, street, type, description, keywords) and AI-curated images (hero + gallery URLs) enable fast filtering, natural-language search, and cross-platform deduplication via semantic fingerprints.
+Structured metadata (title, price, area, rooms, city, street, type, description, keywords) and AI-curated images (hero + gallery URLs) enable fast filtering, natural-language search, and deduplication via semantic fingerprints.
 
 ### How Unstructured or Low-Quality Data Is Handled
 
@@ -24,7 +24,7 @@ Real estate portals embed JSON-LD structured data. The extractor relies on `@typ
 
 ### One Success Metric
 
-**Fingerprint-First Deduplication:** Pre-AI duplicate detection (30-day window) using JSON-LD metadata skips AI calls entirely, saving API costs. Post-AI fingerprint re-check catches cross-platform duplicates and merges them automatically.
+**Fingerprint-First Deduplication:** Pre-AI duplicate detection (30-day window) using JSON-LD metadata skips AI calls entirely, saving API costs. 
 
 ### One Failure Mode or Limitation
 
