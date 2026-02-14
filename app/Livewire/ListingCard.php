@@ -35,7 +35,6 @@ class ListingCard extends Component
     {
         $justActivated = $this->wasPending && ! $this->isPending;
         $this->wasPending = $this->isPending;
-        $this->listing->load('media');
 
         return view('livewire.listing-card', [
             'justActivated' => $justActivated,

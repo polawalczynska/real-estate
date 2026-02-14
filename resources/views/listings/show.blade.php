@@ -46,7 +46,7 @@
         <div class="relative aspect-[21/9] overflow-hidden bg-zinc-100">
             @if($hasHero)
                 <img
-                    src="{{ $listing->getHeroImageUrl('hero') }}"
+                    src="{{ $listing->getHeroImageUrl() }}"
                     alt="{{ $listing->title }}"
                     class="w-full h-full object-cover"
                     loading="eager"

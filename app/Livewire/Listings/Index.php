@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace App\Livewire\Listings;
 
-use App\Contracts\SearchServiceInterface;
 use App\DTOs\SearchCriteriaDTO;
+use App\Services\SearchService;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -57,9 +57,9 @@ class Index extends Component
     #[Url(as: 'sort', history: true, keep: false)]
     public string $sort = 'newest';
 
-    private function getSearchService(): SearchServiceInterface
+    private function getSearchService(): SearchService
     {
-        return app(SearchServiceInterface::class);
+        return app(SearchService::class);
     }
 
     #[Computed]
@@ -189,7 +189,7 @@ class Index extends Component
     public function hasPendingListings(): bool
     {
         return DB::table('jobs')
-            ->whereIn('queue', ['ai', 'media'])
+            ->where('queue', 'ai')
             ->exists();
     }
 

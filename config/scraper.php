@@ -29,35 +29,13 @@ return [
     | HTTP Browser Headers
     |--------------------------------------------------------------------------
     |
-    | Shared browser-like headers used across scraper and image services
-    | to avoid CDN blocks and bot detection.
+    | Browser-like headers used by the scraper to avoid bot detection.
     |
     */
     'browser_headers' => [
         'user_agent'      => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'accept_html'     => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'accept_image'    => 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
         'accept_language' => 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
-    ],
-
-    /*
-    |--------------------------------------------------------------------------
-    | Image Downloads
-    |--------------------------------------------------------------------------
-    */
-    'images' => [
-        'head_timeout'       => (int) env('IMAGE_HEAD_TIMEOUT', 10),
-        'download_timeout'   => (int) env('IMAGE_DOWNLOAD_TIMEOUT', 30),
-        'min_body_bytes'     => 1_000,
-        'max_gallery_images' => 8,
-        'max_fallback_images' => 5,
-        'accepted_mimes'     => [
-            'image/jpeg',
-            'image/png',
-            'image/webp',
-            'image/gif',
-            'image/jpg',
-        ],
     ],
 
     /*

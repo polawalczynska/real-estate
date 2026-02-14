@@ -4,11 +4,11 @@ declare(strict_types=1);
 
 namespace App\Jobs;
 
-use App\Contracts\AiNormalizerInterface;
 use App\DTOs\ListingDTO;
 use App\Enums\ListingStatus;
 use App\Exceptions\AiNormalizationException;
 use App\Models\Listing;
+use App\Services\Ai\AiNormalizationService;
 use App\Services\ListingService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -46,7 +46,7 @@ final class ProcessAiNormalizationJob implements ShouldQueue
     }
 
     public function handle(
-        AiNormalizerInterface $aiService,
+        AiNormalizationService $aiService,
         ListingService $listingService,
     ): void {
         ini_set('memory_limit', '256M');
@@ -115,7 +115,7 @@ final class ProcessAiNormalizationJob implements ShouldQueue
         }
     }
 
-    private function normalizeWithRetry(AiNormalizerInterface $aiService, Listing $listing): ?ListingDTO
+    private function normalizeWithRetry(AiNormalizationService $aiService, Listing $listing): ?ListingDTO
     {
         $rawData = [
             'external_id' => $listing->external_id,

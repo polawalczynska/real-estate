@@ -4,14 +4,13 @@ declare(strict_types=1);
 
 namespace App\Services;
 
-use App\Contracts\SearchServiceInterface;
 use App\DTOs\SearchCriteriaDTO;
 use App\Models\Listing;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Validation\ValidationException;
 
-final class SearchService implements SearchServiceInterface
+final class SearchService
 {
     private const VALID_SORT_FIELDS = ['price', 'created_at', 'area_m2'];
 
@@ -35,8 +34,6 @@ final class SearchService implements SearchServiceInterface
         $this->applySorting($query, $criteria->sortBy, $criteria->sortOrder);
 
         $query->select(Listing::CARD_COLUMNS);
-
-        $query->with('media');
 
         return $query->paginate($criteria->perPage);
     }

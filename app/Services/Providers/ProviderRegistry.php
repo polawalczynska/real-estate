@@ -5,13 +5,16 @@ declare(strict_types=1);
 namespace App\Services\Providers;
 
 use App\Contracts\ListingProviderInterface;
-use App\Contracts\ProviderRegistryInterface;
 use Illuminate\Contracts\Container\Container;
 
 /**
  * Config-driven provider registry.
+ *
+ * Maps provider slugs (e.g. "otodom") to concrete ListingProviderInterface
+ * implementations. Adding a new portal requires only a new class + a map entry
+ * in AppServiceProvider::PROVIDER_MAP.
  */
-final class ProviderRegistry implements ProviderRegistryInterface
+final class ProviderRegistry
 {
     public function __construct(
         private readonly Container $container,
@@ -29,6 +32,9 @@ final class ProviderRegistry implements ProviderRegistryInterface
         return $this->container->make($concrete);
     }
 
+    /**
+     * @return list<string>
+     */
     public function available(): array
     {
         return array_keys($this->providerMap);

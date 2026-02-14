@@ -13,7 +13,6 @@ final class HomeController extends Controller
     {
         $featuredListings = Listing::query()
             ->select(Listing::CARD_COLUMNS)
-            ->with('media')
             ->available()
             ->orderByDesc('quality_score')
             ->orderByDesc('created_at')

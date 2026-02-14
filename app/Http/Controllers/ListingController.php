@@ -11,7 +11,7 @@ final class ListingController extends Controller
 {
     public function show(string $id): View
     {
-        $listing = Listing::with('media')->findOrFail($id);
+        $listing = Listing::findOrFail($id);
 
         return view('listings.show', [
             'listing' => $listing,

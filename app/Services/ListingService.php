@@ -9,16 +9,9 @@ use App\Enums\ListingStatus;
 use App\Enums\PropertyType;
 use App\Models\Listing;
 use Illuminate\Support\Facades\Log;
-use Spatie\MediaLibrary\MediaCollections\Models\Media;
 
 /**
  * Central domain service for listing persistence and lifecycle.
- *
- * Owns: skeleton creation, pre-AI dedup, post-AI normalisation
- * application, quality scoring, duplicate merging, and hero-image designation.
- *
- * This service is the single authority on "how a listing gets into the DB".
- * Controllers, commands, and jobs delegate all persistence logic here.
  */
 final class ListingService
 {
@@ -27,20 +20,10 @@ final class ListingService
 
     public function __construct(
         private readonly Listing $listing,
-        private readonly QualityScoreService $qualityScore,
     ) {}
-
-    // ─── Skeleton Creation (Phase 1) ───────────────────────────────
 
     /**
      * Create a listing record populated with JSON-LD data when available.
-     *
-     * Phase 1 data (JSON-LD) provides accurate price, city, area, and rooms
-     * for a meaningful fingerprint BEFORE any AI call. This enables reliable
-     * pre-AI deduplication and richer skeleton records.
-     *
-     * @param  array<string, mixed>  $scrapedData  Raw data from the provider.
-     * @return array{listing: Listing, is_new: bool, is_fingerprint_duplicate: bool}
      */
     public function createSkeleton(array $scrapedData): array
     {
@@ -128,20 +111,8 @@ final class ListingService
         ];
     }
 
-    // ─── AI Normalisation Application (Phase 2) ────────────────────
-
     /**
      * Apply AI-normalised data to a skeleton listing.
-     *
-     * Pipeline:
-     *  1. Post-AI duplicate detection (merge if found).
-     *  2. DTO Validation — check critical fields (price, area, city).
-     *  3. Quality Scoring — score data completeness (0–100).
-     *  4. Status Resolution — AVAILABLE / INCOMPLETE / FAILED.
-     *  5. Persist normalised fields, score, and status.
-     *  6. Update hero-image designation.
-     *
-     * @return array{merged: bool, quality_score: int, status: string}
      */
     public function applyNormalization(Listing $skeleton, ListingDTO $dto): array
     {
@@ -150,10 +121,20 @@ final class ListingService
         }
 
         // ── Validate → Score → Resolve Status ───────────────────
-        $resolvedStatus = $this->qualityScore->applyToListing($skeleton, $dto);
-        $finalStatus    = $resolvedStatus;
+        $validationErrors = $dto->validate();
+        $qualityScore     = $dto->qualityScore();
+        $isFullyParsed    = $dto->isFullyParsed();
+        $finalStatus      = $dto->resolveStatus();
 
-        // ── Persist normalised fields ────────────────────────────
+        if ($validationErrors !== []) {
+            Log::warning('Listing failed critical-field validation', [
+                'listing_id' => $skeleton->id,
+                'errors'     => $validationErrors,
+                'score'      => $qualityScore,
+                'status'     => $finalStatus->value,
+            ]);
+        }
+
         $rawData        = is_array($skeleton->raw_data) ? $skeleton->raw_data : [];
         $selectedImages = data_get($dto->rawData, 'selected_images');
 
@@ -173,37 +154,28 @@ final class ListingService
             'street'          => $dto->street,
             'type'            => $dto->type->value,
             'status'          => $finalStatus->value,
-            'quality_score'   => $dto->qualityScore(),
-            'is_fully_parsed' => $dto->isFullyParsed(),
+            'quality_score'   => $qualityScore,
+            'is_fully_parsed' => $isFullyParsed,
             'fingerprint'     => $dto->fingerprint(),
             'keywords'        => $dto->keywords,
             'images'          => $dto->images,
             'raw_data'        => $rawData,
         ]);
 
-        // ── Hero designation ─────────────────────────────────────
-        $this->updateHeroDesignation($skeleton, $selectedImages);
-
         Log::debug("AI normalization applied — listing [{$skeleton->id}]", [
             'listing_id'      => $skeleton->id,
             'status'          => $finalStatus->value,
-            'quality_score'   => $dto->qualityScore(),
-            'is_fully_parsed' => $dto->isFullyParsed(),
-            'is_valid'        => $dto->isValid(),
+            'quality_score'   => $qualityScore,
+            'is_fully_parsed' => $isFullyParsed,
         ]);
 
         return [
             'merged'        => false,
-            'quality_score' => $dto->qualityScore(),
+            'quality_score' => $qualityScore,
             'status'        => $finalStatus->value,
         ];
     }
 
-    // ─── Status Management ─────────────────────────────────────────
-
-    /**
-     * Mark a listing as UNVERIFIED when all AI retries are exhausted.
-     */
     public function markUnverified(int $listingId): void
     {
         $listing = Listing::find($listingId);
@@ -213,16 +185,10 @@ final class ListingService
         }
     }
 
-    // ─── Post-AI Upsert ────────────────────────────────────────────
-
     /**
-     * Upsert a listing with fingerprint + external_id dedup.
-     *
      * Safety net for edge cases where the AI produced more accurate
      * city/street values, changing the fingerprint after skeleton creation.
      * Includes quality scoring and status validation.
-     *
-     * @return array{listing: Listing, is_duplicate: bool}
      */
     public function upsert(ListingDTO $dto): array
     {
@@ -273,14 +239,6 @@ final class ListingService
         return ['listing' => $listing, 'is_duplicate' => false];
     }
 
-    // ─── Fingerprint Calculation ───────────────────────────────────
-
-    /**
-     * Calculate a semantic fingerprint from JSON-LD data.
-     *
-     * Returns null if the data lacks enough information (no price AND no city),
-     * preventing false-positive matches on empty data.
-     */
     private function calculateJsonLdFingerprint(array $jsonLd): ?string
     {
         $price = (float) ($jsonLd['price'] ?? 0);
@@ -299,11 +257,6 @@ final class ListingService
         );
     }
 
-    // ─── Duplicate Handling ────────────────────────────────────────
-
-    /**
-     * Refresh a known duplicate: update last_seen_at and detect price changes.
-     */
     private function refreshDuplicate(Listing $existing, array $scrapedData): void
     {
         $updates = ['last_seen_at' => now()];
@@ -327,11 +280,6 @@ final class ListingService
         $existing->update($updates);
     }
 
-    /**
-     * Detect a cross-platform duplicate using the AI-refined fingerprint.
-     *
-     * If found: updates the existing record and deletes the skeleton.
-     */
     private function mergePostAiDuplicate(Listing $skeleton, ListingDTO $dto): bool
     {
         $fingerprint = $dto->fingerprint();
@@ -362,49 +310,4 @@ final class ListingService
         return true;
     }
 
-    // ─── Hero Image ────────────────────────────────────────────────
-
-    /**
-     * Re-designate the hero image based on AI curation.
-     *
-     * If the media job already attached images (it runs in parallel),
-     * match the AI-selected hero URL against `source_url` custom properties.
-     */
-    private function updateHeroDesignation(Listing $listing, ?array $selectedImages): void
-    {
-        if ($selectedImages === null || empty($selectedImages['hero_url'])) {
-            return;
-        }
-
-        $gallery = $listing->fresh()?->getMedia('gallery');
-        if ($gallery === null || $gallery->isEmpty()) {
-            return;
-        }
-
-        $heroUrl = $selectedImages['hero_url'];
-
-        $gallery->each(function (Media $media): void {
-            if ($media->getCustomProperty('is_hero') === true) {
-                $media->setCustomProperty('is_hero', false);
-                $media->save();
-            }
-        });
-
-        $matched = $gallery->first(
-            fn (Media $m): bool => $m->getCustomProperty('source_url') === $heroUrl,
-        );
-
-        if ($matched !== null) {
-            $matched->setCustomProperty('is_hero', true);
-            $matched->save();
-
-            return;
-        }
-
-        $first = $gallery->first();
-        if ($first !== null) {
-            $first->setCustomProperty('is_hero', true);
-            $first->save();
-        }
-    }
 }

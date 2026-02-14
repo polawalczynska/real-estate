@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Livewire;
 
-use App\Contracts\AiSearchInterface;
+use App\Services\Ai\AiSearchService;
 use Illuminate\Support\Facades\Log;
 use Illuminate\View\View;
 use Livewire\Attributes\Locked;
@@ -29,7 +29,7 @@ class HeroSearch extends Component
         $this->loading = true;
 
         try {
-            $criteria = app(AiSearchInterface::class)->parseIntent($query);
+            $criteria = app(AiSearchService::class)->parseIntent($query);
             $params   = $criteria->toQueryParams();
 
             $this->redirect(route('listings.index', $params), navigate: true);

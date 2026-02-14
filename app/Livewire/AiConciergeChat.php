@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Livewire;
 
-use App\Contracts\AiSearchInterface;
+use App\Services\Ai\AiSearchService;
 use Illuminate\Support\Facades\Log;
 use Illuminate\View\View;
 use Livewire\Attributes\Locked;
@@ -109,7 +109,7 @@ class AiConciergeChat extends Component
         }
 
         try {
-            $aiSearch = app(AiSearchInterface::class);
+            $aiSearch = app(AiSearchService::class);
 
             $history = array_map(
                 static fn (array $msg): array => [

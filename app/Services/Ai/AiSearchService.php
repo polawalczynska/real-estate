@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Services\Ai;
 
-use App\Contracts\AiSearchInterface;
 use App\DTOs\SearchCriteriaDTO;
 use App\Services\Ai\Concerns\InteractsWithClaude;
 use Illuminate\Support\Facades\Cache;
@@ -15,15 +14,8 @@ use Throwable;
 /**
  * AI Concierge — translates natural-language property queries
  * into structured SearchCriteriaDTO using Claude.
- *
- * Supports two modes:
- *  1. `parseIntent()` — single-shot query → cached SearchCriteriaDTO.
- *  2. `converse()` — multi-turn chat with history → prose + criteria.
- *
- * On any AI failure, falls back to deterministic regex-based parsing
- * so the user always gets results.
  */
-final class AiSearchService implements AiSearchInterface
+final class AiSearchService
 {
     use InteractsWithClaude;
 
@@ -33,11 +25,6 @@ final class AiSearchService implements AiSearchInterface
         private readonly ?string $model = null,
     ) {}
 
-    /**
-     * Parse a natural-language search query into structured criteria.
-     *
-     * Results are cached for `search_cache_ttl_hours` to avoid redundant API calls.
-     */
     public function parseIntent(string $query): SearchCriteriaDTO
     {
         $query = trim($query);
@@ -54,12 +41,7 @@ final class AiSearchService implements AiSearchInterface
         });
     }
 
-    /**
-     * Generate a conversational AI response with extracted criteria.
-     *
-     * @param  array<int, array{role: string, content: string}>  $history
-     * @return array{message: string, criteria: SearchCriteriaDTO}
-     */
+
     public function converse(string $userMessage, array $history = []): array
     {
         $userMessage = trim($userMessage);
@@ -110,11 +92,6 @@ final class AiSearchService implements AiSearchInterface
         }
     }
 
-    // ─── Intent Parsing ────────────────────────────────────────────
-
-    /**
-     * Call Claude for single-shot intent parsing.
-     */
     private function callClaude(string $query): SearchCriteriaDTO
     {
         try {
@@ -157,25 +134,16 @@ final class AiSearchService implements AiSearchInterface
         }
     }
 
-    // ─── Converse Response Parsing ─────────────────────────────────
-
-    /**
-     * Separate prose from embedded JSON in a conversational Claude response.
-     *
-     * @return array{message: string, criteria: SearchCriteriaDTO}
-     */
     private function parseConverseResponse(string $content, string $originalQuery): array
     {
         $prose = $content;
         $json  = null;
 
-        // Try fenced JSON block first
         if (preg_match('/```json\s*(\{.*?\})\s*```/s', $content, $matches)) {
             $json  = json_decode($matches[1], true);
             $prose = trim(preg_replace('/```json\s*\{.*?\}\s*```/s', '', $content));
         }
 
-        // Fall back to last bare JSON object in response
         if ($json === null) {
             $lastBrace = strrpos($content, '}');
             if ($lastBrace !== false) {
@@ -203,13 +171,6 @@ final class AiSearchService implements AiSearchInterface
         return ['message' => $prose, 'criteria' => $criteria];
     }
 
-    // ─── Deterministic Fallback Parsing ────────────────────────────
-
-    /**
-     * Regex-based fallback when Claude is unavailable or fails.
-     *
-     * Extracts city, type, price ceiling, and keywords from the query text.
-     */
     private function fallbackParse(string $query): SearchCriteriaDTO
     {
         $lower = mb_strtolower($query);
@@ -223,11 +184,6 @@ final class AiSearchService implements AiSearchInterface
         ]);
     }
 
-    /**
-     * Build a fallback conversational response from regex parsing.
-     *
-     * @return array{message: string, criteria: SearchCriteriaDTO}
-     */
     private function fallbackConverse(string $userMessage): array
     {
         $criteria = $this->fallbackParse($userMessage);
@@ -305,9 +261,6 @@ final class AiSearchService implements AiSearchInterface
         return null;
     }
 
-    /**
-     * @return list<string>
-     */
     private function detectKeywords(string $lower): array
     {
         $terms = [

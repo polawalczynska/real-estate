@@ -95,7 +95,7 @@
                             @if($listing->hasHeroImage())
                                 {{-- State 1: Real image --}}
                             <img 
-                                src="{{ $listing->getHeroImageUrl('card') }}" 
+                                src="{{ $listing->getHeroImageUrl() }}" 
                                 alt="{{ $listing->title }}"
                                     class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                                     loading="lazy"
